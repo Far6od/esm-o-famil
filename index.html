@@ -329,8 +329,6 @@ table.rt{width:100%;border-collapse:separate;border-spacing:0;background:var(--c
 <canvas id="confetti" aria-hidden="true"></canvas>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
 <script>
 (()=>{
 'use strict';
@@ -543,7 +541,7 @@ function handle(pid,m){
 
 /* ---------- UI helpers ---------- */
 const ERR={
-  lib:'کتابخانه‌های لازم بارگیری نشدند. اینترنت را بررسی و صفحه را دوباره باز کنید.',
+  lib:'این نسخه برای QR به کتابخانه‌ی دانلودی نیاز ندارد. اگر اتصال بازی برقرار نشد، کد اتاق را دستی وارد کنید.',
   net:'اتصال به سرور سیگنالینگ برقرار نشد. اینترنت را بررسی کنید.',
   room:'اتاقی با این کد پیدا نشد یا منقضی شده است.',
   rtc:'مرورگر شما از WebRTC پشتیبانی نمی‌کند.',
@@ -607,7 +605,22 @@ setSound(soundOn);
 (()=>{const bg=$('#bg'),L=[...'ابپتجچحخدرزسشعفقکگلمنوهی'];for(let i=0;i<16;i++){const s=h('span',{class:'bgl',text:L[rnd(L.length)]});s.style.cssText=`left:${rnd(96)}%;top:${rnd(92)}%;font-size:${40+rnd(90)}px;--d:${6+rnd(8)}s;--r0:${rnd(50)-25}deg;animation-delay:-${rnd(8)}s`;bg.append(s)}})();
 
 /* ---------- networking ---------- */
-const ICE={iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'},{urls:'stun:global.stun.twilio.com:3478'}]};
+// Worldwide networking configuration. This is intentionally isolated from the game/UI.
+// PeerJS Cloud handles signaling; STUN helps browsers connect across different networks.
+// A TURN relay is still needed for some restrictive NATs/firewalls. Add provider-issued,
+// short-lived TURN credentials to TURN_ICE_SERVERS if you later configure a TURN provider.
+// Never publish a permanent TURN secret in a public GitHub Pages file.
+const TURN_ICE_SERVERS=[];
+const ICE={iceServers:[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'},
+  {urls:'stun:stun2.l.google.com:19302'},
+  {urls:'stun:stun3.l.google.com:19302'},
+  {urls:'stun:stun4.l.google.com:19302'},
+  {urls:'stun:global.stun.twilio.com:3478'},
+  ...TURN_ICE_SERVERS
+],sdpSemantics:'unified-plan'};
+const PEER_OPTIONS={host:'0.peerjs.com',port:443,path:'/',secure:true,config:ICE,debug:0,pingInterval:5000};
 const PREFIX='esmfamil-v1-',CODE_CH='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const genCode=()=>{const a=new Uint8Array(5);crypto.getRandomValues(a);return [...a].map(x=>CODE_CH[x%CODE_CH.length]).join('')};
 function normCode(v){return String(v||'').replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[^A-Za-z0-9]/g,'').toUpperCase()}
@@ -621,8 +634,8 @@ function parseQR(t){
 function openPeer(id){
   return new Promise((res,rej)=>{
     if(!window.Peer)return rej({type:'lib'});
-    let done=false;const p=new Peer(id,{config:ICE,debug:0});
-    const to=setTimeout(()=>{if(!done){done=true;try{p.destroy()}catch{}rej({type:'timeout'})}},12000);
+    let done=false;const p=new Peer(id,PEER_OPTIONS);
+    const to=setTimeout(()=>{if(!done){done=true;try{p.destroy()}catch{}rej({type:'timeout'})}},20000);
     p.on('open',()=>{done=true;clearTimeout(to);res(p)});
     p.on('error',e=>{if(!done){done=true;clearTimeout(to);try{p.destroy()}catch{}rej(e)}else hostPeerError(e)});
   });
@@ -694,8 +707,8 @@ function connectClient(code,name,pid,tok){
     if(!window.Peer)return reject({type:'lib'});
     let settled=false;
     const fail=e=>{if(settled)return;settled=true;clearTimeout(to);try{peer.destroy()}catch{}reject(e)};
-    const peer=new Peer(undefined,{config:ICE,debug:0});A.peer=peer;
-    const to=setTimeout(()=>fail({type:'timeout'}),14000);
+    const peer=new Peer(undefined,PEER_OPTIONS);A.peer=peer;
+    const to=setTimeout(()=>fail({type:'timeout'}),25000);
     peer.on('error',e=>{if(!settled)fail(e)});
     peer.on('open',()=>{
       const conn=peer.connect(PREFIX+code,{reliable:true,serialization:'json'});A.conn=conn;
@@ -776,14 +789,15 @@ async function leaveGame(){
 }
 window.addEventListener('pagehide',()=>{if(A.role==='host'&&G){for(const id of G.order){const p=G.players[id];if(p&&p.conn&&p.conn.open)try{p.conn.send({t:'closed'})}catch{}}}else if(A.role==='client'&&A.conn&&A.conn.open){try{A.conn.send({t:'leave'})}catch{}store('esmf-sess',store('esmf-sess'))}});
 
-/* ---------- QR scanner ---------- */
-const SC={stream:null,on:false,t:0,lastBad:0};
+/* ---------- Self-contained QR scanner (native browser API; no library downloads) ---------- */
+const SC={stream:null,on:false,t:0,lastBad:0,detector:null,busy:false};
 async function openScanner(){
   const name=cleanName($('#joinName').value);
   if(!nameOk(name)){$('#joinErr').textContent=ERR.name;$('#joinName').focus();return}
   $('#joinErr').textContent='';
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.isSecureContext){$('#joinErr').textContent=ERR.insecure;$('#codeIn').focus();return}
-  if(!window.jsQR){$('#joinErr').textContent=ERR.lib;return}
+  if(!('BarcodeDetector' in window)){$('#joinErr').textContent='این مرورگر اسکن خودکار QR را پشتیبانی نمی‌کند. Chrome یا Edge به‌روز را امتحان کنید یا کد اتاق را دستی وارد کنید.';$('#codeIn').focus();return}
+  try{SC.detector=new BarcodeDetector({formats:['qr_code']})}catch{$('#joinErr').textContent='اسکنر QR در این مرورگر در دسترس نیست؛ کد اتاق را دستی وارد کنید.';return}
   const ov=$('#scanner');ov.hidden=false;$('#scMsg').textContent='در حال باز کردن دوربین…';$('#scClose').focus();
   try{
     SC.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
@@ -796,21 +810,23 @@ async function openScanner(){
   }
 }
 function stopStream(){if(SC.stream){SC.stream.getTracks().forEach(t=>t.stop());SC.stream=null}const v=$('#scVideo');v.pause();v.srcObject=null}
-function closeScanner(){SC.on=false;clearTimeout(SC.t);stopStream();const o=$('#scanner');if(o)o.hidden=true}
-function scanLoop(){
-  if(!SC.on)return;
+function closeScanner(){SC.on=false;SC.busy=false;clearTimeout(SC.t);stopStream();const o=$('#scanner');if(o)o.hidden=true}
+async function scanLoop(){
+  if(!SC.on||SC.busy)return;
   const v=$('#scVideo');
   if(v.readyState>=2&&v.videoWidth){
-    const c=$('#scCanvas'),w=Math.min(520,v.videoWidth),hh=Math.round(v.videoHeight*w/v.videoWidth);c.width=w;c.height=hh;
-    const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(v,0,0,w,hh);
-    const r=jsQR(x.getImageData(0,0,w,hh).data,w,hh,{inversionAttempts:'dontInvert'});
-    if(r&&r.data){
-      const code=parseQR(r.data);
-      if(code){const name=cleanName($('#joinName').value);closeScanner();$('#codeIn').value=code;joinRoom(code,name);return}
-      if(Date.now()-SC.lastBad>1500){SC.lastBad=Date.now();$('#scMsg').textContent=ERR.qr}
-    }
+    SC.busy=true;
+    try{
+      const found=await SC.detector.detect(v);
+      for(const item of found){
+        const code=parseQR(item.rawValue);
+        if(code){const name=cleanName($('#joinName').value);closeScanner();$('#codeIn').value=code;joinRoom(code,name);return}
+        if(Date.now()-SC.lastBad>1800){SC.lastBad=Date.now();$('#scMsg').textContent='QR شناسایی شد اما کد آن معتبر نیست؛ کد QR میزبان را اسکن کنید.'}
+      }
+    }catch(e){/* Some camera frames may not decode; keep scanning. */}
+    finally{SC.busy=false}
   }
-  SC.t=setTimeout(scanLoop,120);
+  if(SC.on)SC.t=setTimeout(scanLoop,180);
 }
 
 /* ---------- views ---------- */
@@ -835,13 +851,40 @@ function renderState(){
   if(U[vp])U[vp](s);pillUpdate();
 }
 /* lobby */
+// Compact QR encoder for the short ESMF:ABCDE room payload (QR version 1-L).
+// All code is embedded here; generating a room QR never downloads a library.
+function qrMatrix(text){
+  const bytes=[...new TextEncoder().encode(text)];if(bytes.length>17)throw Error('QR payload too long');
+  const bits=[];const put=(v,n)=>{for(let i=n-1;i>=0;i--)bits.push((v>>>i)&1)};
+  put(4,4);put(bytes.length,8);for(const b of bytes)put(b,8);for(let i=0;i<Math.min(4,152-bits.length);i++)bits.push(0);while(bits.length%8)bits.push(0);
+  const data=[];for(let i=0;i<bits.length;i+=8){let v=0;for(let j=0;j<8;j++)v=(v<<1)|bits[i+j];data.push(v)}
+  for(let pad=0;data.length<19;pad++)data.push(pad%2?0x11:0xEC);
+  const mul=(x,y)=>{let z=0,a=x,b=y;while(b){if(b&1)z^=a;a=(a&0x80)?((a<<1)^0x11D):(a<<1);a&=255;b>>=1}return z&255};
+  const ecc=[127,122,154,164,11,68,117],rem=Array(7).fill(0);
+  for(const b of data){const factor=b^rem[0];rem.shift();rem.push(0);for(let i=0;i<7;i++)rem[i]^=mul(ecc[i],factor)}
+  const all=data.concat(rem),db=[];for(const b of all)for(let i=7;i>=0;i--)db.push((b>>>i)&1);
+  const n=21,m=Array.from({length:n},()=>Array(n).fill(false)),res=Array.from({length:n},()=>Array(n).fill(false));
+  const set=(x,y,v)=>{if(x>=0&&x<n&&y>=0&&y<n){m[y][x]=!!v;res[y][x]=true}};
+  for(const [ox,oy] of [[0,0],[n-7,0],[0,n-7]])for(let dy=-1;dy<=7;dy++)for(let dx=-1;dx<=7;dx++){const x=ox+dx,y=oy+dy;if(x<0||y<0||x>=n||y>=n)continue;const inside=dx>=0&&dx<=6&&dy>=0&&dy<=6;const dark=inside&&(dx===0||dx===6||dy===0||dy===6||(dx>=2&&dx<=4&&dy>=2&&dy<=4));set(x,y,dark)}
+  for(let i=8;i<n-8;i++){set(i,6,i%2===0);set(6,i,i%2===0)}
+  // Reserve both format-information copies and the fixed dark module.
+  for(let i=0;i<=5;i++)set(8,i,false);set(8,7,false);set(8,8,false);set(7,8,false);for(let i=9;i<15;i++)set(14-i,8,false);
+  for(let i=0;i<8;i++)set(n-1-i,8,false);for(let i=8;i<15;i++)set(8,n-15+i,false);set(8,n-8,true);
+  let k=0,up=true;for(let right=n-1;right>=1;right-=2){if(right===6)right=5;for(let vert=0;vert<n;vert++){const y=up?n-1-vert:vert;for(let j=0;j<2;j++){const x=right-j;if(!res[y][x]){let bit=k<db.length?db[k++]:0;if((x+y)%2===0)bit^=1;m[y][x]=!!bit}}}up=!up}
+  let fmtRem=(8<<10);for(let i=14;i>=10;i--)if((fmtRem>>>i)&1)fmtRem^=(0x537<<(i-10));const fmt=((8<<10)|(fmtRem&0x3FF))^0x5412;
+  const fbit=i=>(fmt>>>i)&1;
+  for(let i=0;i<=5;i++)m[i][8]=!!fbit(i);m[7][8]=!!fbit(6);m[8][8]=!!fbit(7);m[8][7]=!!fbit(8);for(let i=9;i<15;i++)m[8][14-i]=!!fbit(i);
+  for(let i=0;i<8;i++)m[8][n-1-i]=!!fbit(i);for(let i=8;i<15;i++)m[n-15+i][8]=!!fbit(i);m[n-8][8]=true;
+  return m;
+}
 function qrSvg(text){
-  const q=qrcode(0,'M');q.addData(text);q.make();const n=q.getModuleCount(),m=2;let d='';
-  for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(q.isDark(r,c))d+='M'+(c+m)+','+(r+m)+'h1v1h-1z';
-  const N=n+2*m;return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+N+' '+N+'" shape-rendering="crispEdges"><rect width="'+N+'" height="'+N+'" fill="#fff"/><path d="'+d+'" fill="#000"/></svg>';
+  const matrix=qrMatrix(text),n=matrix.length,quiet=4;let d='';
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++)if(matrix[y][x])d+='M'+(x+quiet)+','+(y+quiet)+'h1v1h-1z';
+  const size=n+quiet*2;return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+size+' '+size+'" shape-rendering="crispEdges" role="img" aria-label="QR اتاق"><rect width="'+size+'" height="'+size+'" fill="#fff"/><path d="'+d+'" fill="#000"/></svg>';
 }
 const joinLink=code=>/^https?:$/.test(location.protocol)?location.href.split('#')[0]+'#room='+code:null;
-const qrText=code=>joinLink(code)||('ESMF:'+code);
+// Keep the QR payload short and independent of the hosting URL; the scanner extracts the room code.
+const qrText=code=>'ESMF:'+code;
 B.lobby=s=>{show('s-lobby');A.ans=[];A.ansR=-1;$('#lock').hidden=true;$('#roomCode').textContent=s.room;
   const box=$('#qrBox');try{box.innerHTML=window.qrcode?qrSvg(qrText(s.room)):''}catch{box.textContent=''}
   $('#shareBtn').hidden=!joinLink(s.room)};
@@ -1020,7 +1063,1078 @@ $('#nextBtn').onclick=()=>act({t:'next'});$('#toLobbyBtn').onclick=()=>act({t:'l
   const m=(location.hash||'').match(/room=([A-Za-z0-9]{5})/);refreshResume();
   if(m&&codeOk(m[1].toUpperCase())&&A.role===null){show('s-join');$('#joinName').value=lstore('esmf-name')||'';$('#codeIn').value=m[1].toUpperCase();toast('کد اتاق شناسایی شد. نام خود را بنویسید و وارد شوید.','ok')}
   else show('s-home');
-  if(!window.Peer)toast(ERR.lib,'bad');
+  if(!window.Peer)toast('کتابخانه‌ی اتصال بازی بارگیری نشده است؛ QR مستقل است اما اتصال چندنفره به کتابخانه‌ی PeerJS نیاز دارد. صفحه را با اینترنت بازخوانی کنید.','bad');
+})();
+})();
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0fa89b">
+<meta name="referrer" content="no-referrer">
+<title>اسم و فامیل</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css">
+<style>
+:root{--bg:#fbf6ea;--bg2:#f1e9d3;--card:#fffdf7;--inp:#fff;--ink:#14263f;--muted:#566579;--tq:#0fa89b;--blue:#1d4f9c;--line:#e4dac0;--ok:#16825a;--bad:#c93a4d;--warn:#b27a05;--btn:#08766d;--btn-ink:#fff;--shadow:0 12px 30px -14px rgba(20,38,63,.3);--r:18px;--glow:rgba(15,168,155,.18)}
+[data-theme=dark]{--bg:#0b1829;--bg2:#12263d;--card:#13294262;--card:#142a45;--inp:#0f2138;--ink:#eef3f8;--muted:#a4b6cb;--tq:#2cc9ba;--blue:#7aa6ff;--line:#26445f;--ok:#4cd29c;--bad:#ff7b8d;--warn:#f0c24d;--btn:#2cc9ba;--btn-ink:#062a27;--shadow:0 12px 30px -14px rgba(0,0,0,.6);--glow:rgba(44,201,186,.15)}
+*{box-sizing:border-box;margin:0}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{font-family:Vazirmatn,Tahoma,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;min-height:100dvh;line-height:1.75;overflow-x:hidden;transition:background .3s,color .3s}
+body::before{content:"";position:fixed;inset:0;z-index:-2;background:radial-gradient(900px 500px at 85% -5%,var(--glow),transparent 60%),radial-gradient(700px 500px at 5% 105%,rgba(29,79,156,.14),transparent 60%)}
+#bg{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+.bgl{position:absolute;font-weight:900;color:var(--blue);opacity:.07;animation:fl var(--d) ease-in-out infinite alternate;user-select:none}
+@keyframes fl{from{transform:translateY(0) rotate(var(--r0))}to{transform:translateY(-34px) rotate(calc(var(--r0) + 14deg))}}
+button,input,select{font:inherit}
+:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:calc(env(safe-area-inset-top) + 10px) 16px 0;max-width:920px;margin:0 auto}
+.brand{font-weight:900;font-size:1.15rem;color:var(--blue);background:none;border:0;cursor:default;padding:6px}
+.tools{display:flex;align-items:center;gap:8px;margin-inline-start:auto}
+.icon{width:44px;height:44px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--ink);display:grid;place-items:center;cursor:pointer;transition:transform .12s}
+.icon:active{transform:scale(.92)}
+.icon svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.icon[aria-pressed=false] .wave{display:none}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-size:.85rem;font-weight:600}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 4px rgba(22,130,90,.18)}.dot.warn{background:var(--warn);animation:pulse 1s infinite}.dot.bad{background:var(--bad)}
+@keyframes pulse{50%{opacity:.35}}
+#app{max-width:920px;margin:0 auto;padding:10px 16px calc(40px + env(safe-area-inset-bottom))}
+.screen.in{animation:enter .45s cubic-bezier(.2,.8,.2,1)}
+@keyframes enter{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+h1,h2,h3{line-height:1.4}h2{font-size:1.35rem}
+[tabindex="-1"]:focus{outline:none}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;box-shadow:var(--shadow)}
+.card+.card{margin-top:14px}
+.muted{color:var(--muted)}.small{font-size:.88rem}
+.btn{font-weight:700;border:0;border-radius:14px;padding:12px 20px;min-height:48px;cursor:pointer;transition:transform .12s,box-shadow .2s,opacity .2s;color:var(--ink);background:var(--bg2)}
+.btn:active:not(:disabled){transform:scale(.97)}
+.btn.primary{background:var(--btn);color:var(--btn-ink);box-shadow:0 10px 22px -10px var(--btn)}
+.btn.ghost{background:transparent;border:2px solid var(--blue);color:var(--blue)}
+.btn.danger{background:var(--bad);color:#fff}
+.btn.lg{min-height:60px;font-size:1.15rem;width:100%}
+.btn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
+.btn.link{background:none;min-height:44px;text-decoration:underline;color:var(--muted);font-weight:500}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row>.grow{flex:1}
+label.lb{display:block;font-weight:700;margin-bottom:6px}
+input,select{color:var(--ink);background:var(--inp);border:2px solid var(--line);border-radius:12px;padding:10px 14px;min-height:50px;width:100%;transition:border-color .2s,box-shadow .2s}
+input:focus,select:focus{border-color:var(--tq);box-shadow:0 0 0 4px var(--glow)}
+.err{color:var(--bad);font-size:.9rem;min-height:1.6em;font-weight:600}
+.stack{display:grid;gap:12px}
+.form{max-width:460px;margin:24px auto}
+/* home */
+.hero{text-align:center;padding:30px 0 10px;position:relative}
+.cards3{position:relative;height:120px;margin:0 auto 6px;width:260px}
+.pc{position:absolute;width:78px;height:98px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);display:grid;place-items:center;font-size:2.4rem;font-weight:900;color:var(--blue);top:8px;animation:bob 4s ease-in-out infinite alternate}
+.pc:nth-child(1){left:10px;transform:rotate(-12deg)}.pc:nth-child(2){left:90px;top:0;color:var(--tq);animation-delay:-1.3s}.pc:nth-child(3){left:170px;transform:rotate(11deg);animation-delay:-2.4s}
+@keyframes bob{to{translate:0 -8px}}
+.title{font-size:clamp(2.6rem,9vw,4.2rem);font-weight:900;background:linear-gradient(120deg,var(--blue),var(--tq));-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.3}
+.sub{font-size:1.15rem;color:var(--muted);margin:4px 0 26px}
+.hero .stack{max-width:380px;margin:0 auto}
+details.rules{max-width:420px;margin:22px auto 0;text-align:start;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 16px}
+details.rules summary{cursor:pointer;font-weight:700;min-height:36px;display:flex;align-items:center}
+details.rules ul{padding-inline-start:20px;margin-top:6px}
+/* lobby */
+.roomhead{display:flex;gap:18px;align-items:center;flex-wrap:wrap;justify-content:space-between}
+.code{font-size:2.6rem;font-weight:900;letter-spacing:.18em;direction:ltr;color:var(--blue);font-family:ui-monospace,Menlo,Consolas,monospace}
+.qr{width:190px;height:190px;border-radius:16px;overflow:hidden;background:#fff;padding:6px;border:1px solid var(--line);flex:none}
+.qr svg{width:100%;height:100%;display:block}
+.plist{list-style:none;padding:0;display:grid;gap:10px;margin-top:10px}
+.plist li{display:flex;align-items:center;gap:12px;background:var(--bg2);border-radius:14px;padding:10px 12px;animation:enter .35s}
+.av{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;font-weight:900;color:#fff;background:hsl(var(--h) 55% 38%);flex:none}
+.pn{font-weight:700;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag{font-size:.75rem;font-weight:700;border-radius:99px;padding:2px 10px;background:var(--blue);color:#fff}
+.tag.me{background:var(--tq);color:#06302c}
+.st{display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--muted)}
+.btn.sm{min-height:44px;padding:6px 14px;font-size:.88rem}
+/* choose */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:10px;margin-top:16px}
+.lt{aspect-ratio:1;min-height:56px;font-size:1.7rem;font-weight:900;border-radius:16px;border:2px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;transition:transform .12s,background .2s,border-color .2s}
+.lt:hover:not(:disabled){border-color:var(--tq);transform:translateY(-3px)}
+.lt:disabled{opacity:.35;cursor:not-allowed}
+.center{text-align:center}
+.timer{font-variant-numeric:tabular-nums;font-weight:800}
+/* countdown */
+.cd{min-height:60vh;display:grid;place-content:center;text-align:center;gap:6px}
+.cdn{font-size:clamp(7rem,32vw,12rem);font-weight:900;line-height:1;color:var(--tq)}
+.cdn.pop{animation:pop .6s cubic-bezier(.2,.9,.3,1.4)}
+@keyframes pop{from{transform:scale(.4);opacity:0}to{transform:none;opacity:1}}
+.bigl{display:inline-grid;place-items:center;width:84px;height:84px;border-radius:22px;background:var(--blue);color:#fff;font-size:3rem;font-weight:900;margin:0 auto}
+/* round */
+.rhead{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0 8px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}
+.rhead .bigl{width:56px;height:56px;font-size:2rem;border-radius:16px}
+.bar{height:8px;background:var(--bg2);border-radius:9px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;width:100%;background:var(--tq);transform-origin:right;transition:background .3s}
+.bar i.low{background:var(--bad)}
+.fields{display:grid;grid-template-columns:1fr;gap:6px 14px;margin-top:14px}
+@media(min-width:700px){.fields{grid-template-columns:1fr 1fr}}
+.fd{position:relative}
+.fd label{display:block;font-weight:700;font-size:.95rem;margin-bottom:2px}
+.fd input{padding-inline-end:44px;font-size:1.1rem}
+.fd input[aria-invalid=true]{border-color:var(--bad)}
+.fd input.ok{border-color:var(--ok)}
+.fd .mk{position:absolute;inset-inline-end:12px;top:36px;font-weight:900}
+.fd .mk.ok{color:var(--ok)}.fd .mk.bad{color:var(--bad)}
+.fd .hn{font-size:.78rem;color:var(--bad);min-height:1.3em;font-weight:600}
+.dock{position:sticky;bottom:0;background:linear-gradient(transparent,var(--bg) 30%);padding:18px 0 calc(8px + env(safe-area-inset-bottom));display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-top:10px}
+.stop{min-width:220px;flex:1;min-height:62px;font-size:1.4rem;font-weight:900;border-radius:18px;border:0;cursor:pointer;background:var(--bad);color:#fff;box-shadow:0 12px 24px -12px var(--bad);transition:transform .12s,opacity .2s}
+.stop:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+.stop:active:not(:disabled){transform:scale(.96)}
+.lock{position:fixed;inset:0;background:rgba(10,24,41,.78);display:grid;place-items:center;z-index:30;text-align:center;color:#fff;padding:20px}
+.lock .big{font-size:2.6rem;font-weight:900;animation:pop .5s}
+/* vote */
+.vc{padding:16px;border-radius:16px;background:var(--card);border:1px solid var(--line);margin-top:12px;box-shadow:var(--shadow)}
+.chips{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{background:var(--bg2);border-radius:99px;padding:2px 12px;font-weight:700;font-size:.88rem}
+.chip.l{background:var(--blue);color:#fff}
+.word{font-size:2rem;font-weight:900;margin:8px 0;word-break:break-word}
+.q{color:var(--muted);margin-bottom:8px}
+.vb{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.vb .btn{min-height:54px;font-size:1.05rem}
+.btn.yes{background:var(--ok);color:#fff}.btn.no{background:var(--bad);color:#fff}
+.vb .btn[aria-pressed=true]{outline:4px solid var(--blue);outline-offset:2px}
+.vb .btn:disabled:not([aria-pressed=true]){opacity:.35}
+/* results */
+.banner{text-align:center;padding:22px 14px;border-radius:var(--r);background:linear-gradient(135deg,var(--blue),var(--tq));color:#fff;box-shadow:var(--shadow);animation:pop .7s}
+.banner .t{font-size:1.9rem;font-weight:900}
+.board{list-style:none;padding:0;display:grid;gap:8px;margin-top:12px}
+.board li{display:flex;gap:12px;align-items:center;background:var(--bg2);border-radius:14px;padding:8px 12px}
+.board li.top1{outline:2px solid var(--tq)}
+.board .sc{margin-inline-start:auto;text-align:end;font-weight:800}
+.board .sc small{display:block;font-weight:500;color:var(--muted)}
+.tw{margin-top:14px}
+table.rt{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.rt th,.rt td{padding:10px 12px;text-align:start;border-bottom:1px solid var(--line);vertical-align:top}
+.rt thead th{background:var(--bg2);font-weight:800}
+.rt td.cat{font-weight:800;color:var(--blue);white-space:nowrap}
+.rt .w{font-weight:700;word-break:break-word}.rt .n{font-size:.76rem;color:var(--muted);line-height:1.5}
+.pts{display:inline-block;min-width:34px;text-align:center;border-radius:99px;padding:0 10px;font-weight:800;font-size:.85rem;background:var(--bg2);margin-inline-start:6px}
+.pts.p10{background:var(--ok);color:#fff}.pts.p5{background:var(--warn);color:#fff}
+.rt tfoot td{font-weight:800;background:var(--bg2)}
+@media(max-width:720px){
+.rt,.rt tbody,.rt tr,.rt td,.rt tfoot{display:block;width:100%}.rt thead{display:none}
+.rt{background:none;border:0;border-radius:0}
+.rt tr{background:var(--card);border:1px solid var(--line);border-radius:14px;margin-bottom:10px;overflow:hidden}
+.rt td{display:flex;justify-content:space-between;gap:12px;border-bottom:1px dashed var(--line)}
+.rt td::before{content:attr(data-label);font-weight:600;color:var(--muted);flex:none}
+.rt td.cat{background:var(--bg2);color:var(--blue)}.rt td.cat::before{content:none}
+.rt td>div{text-align:end}
+}
+.toasts{position:fixed;inset-inline:12px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:60;display:grid;gap:8px;pointer-events:none;max-width:520px;margin-inline:auto}
+.toast{background:var(--ink);color:var(--bg);border-radius:14px;padding:12px 16px;font-weight:600;box-shadow:var(--shadow);animation:enter .3s}
+.toast.bad{background:var(--bad);color:#fff}.toast.ok{background:var(--ok);color:#fff}
+.ov{position:fixed;inset:0;background:rgba(8,18,32,.86);z-index:50;display:grid;place-items:center;padding:16px}
+.ov .box{width:min(440px,100%);background:var(--card);border-radius:22px;padding:16px;border:1px solid var(--line)}
+.vwrap{position:relative;border-radius:18px;overflow:hidden;background:#000;aspect-ratio:1;margin:12px 0}
+.vwrap video{width:100%;height:100%;object-fit:cover;display:block}
+.frame{position:absolute;inset:16%;border-radius:18px;box-shadow:0 0 0 999px rgba(0,0,0,.45);pointer-events:none}
+.frame::before,.frame::after,.frame i::before,.frame i::after{content:"";position:absolute;width:34px;height:34px;border:5px solid var(--tq)}
+.frame::before{top:-3px;left:-3px;border-right:0;border-bottom:0;border-radius:18px 0 0 0}
+.frame::after{top:-3px;right:-3px;border-left:0;border-bottom:0;border-radius:0 18px 0 0}
+.frame i::before{bottom:-3px;left:-3px;border-right:0;border-top:0;border-radius:0 0 0 18px}
+.frame i::after{bottom:-3px;right:-3px;border-left:0;border-top:0;border-radius:0 0 18px 0}
+.frame b{position:absolute;left:6%;right:6%;height:3px;background:var(--tq);box-shadow:0 0 12px var(--tq);top:0;animation:scan 2.2s ease-in-out infinite alternate}
+@keyframes scan{to{top:calc(100% - 3px)}}
+#confetti{position:fixed;inset:0;pointer-events:none;z-index:40}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div id="bg" aria-hidden="true"></div>
+<header class="top">
+  <button class="brand" id="brand" tabindex="-1" hidden>اسم و فامیل</button>
+  <div class="tools">
+    <span class="pill" id="pill" hidden role="status"><i class="dot" id="pdot"></i><span id="ptxt"></span></span>
+    <button class="icon" id="btnSound" aria-label="صدا" aria-pressed="true" title="صدا"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path class="wave" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg></button>
+    <button class="icon" id="btnTheme" aria-label="تغییر پوسته‌ی روشن و تیره" title="پوسته"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17" /><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></svg></button>
+  </div>
+</header>
+
+<main id="app">
+<!-- خانه -->
+<section class="screen" id="s-home">
+  <div class="hero">
+    <div class="cards3" aria-hidden="true"><div class="pc">ا</div><div class="pc">س</div><div class="pc">م</div></div>
+    <h1 class="title" data-h tabindex="-1">اسم و فامیل</h1>
+    <p class="sub">دورهمی، رقابت و کلی خاطره!</p>
+    <div class="stack">
+      <button class="btn primary lg" id="goHost">میزبان شو</button>
+      <button class="btn ghost lg" id="goJoin">پیوستن به بازی</button>
+      <button class="btn" id="resumeBtn" hidden>بازگشت به اتاق قبلی</button>
+    </div>
+    <details class="rules">
+      <summary>قوانین امتیازدهی</summary>
+      <ul class="small">
+        <li>پاسخ درست و یکتا: ۱۰ امتیاز</li>
+        <li>پاسخ درست ولی تکراری (دیگری هم نوشته): ۵ امتیاز</li>
+        <li>پاسخ خالی، نادرست یا ردشده: ۰ امتیاز</li>
+        <li>کلمه‌های ناشناخته با رأی ناشناس بقیه بازبینی می‌شوند.</li>
+      </ul>
+    </details>
+  </div>
+</section>
+
+<!-- نام میزبان -->
+<section class="screen" id="s-host" hidden>
+  <form class="card form stack" id="hostForm" novalidate>
+    <h2 data-h tabindex="-1">میزبان بازی</h2>
+    <div><label class="lb" for="hostName">نام شما</label><input id="hostName" maxlength="14" autocomplete="off" placeholder="مثلاً سارا" lang="fa" aria-describedby="hostErr"><p class="err" id="hostErr" role="alert"></p></div>
+    <button class="btn primary lg" id="hostGo" type="submit">ساخت اتاق</button>
+    <button class="btn link" type="button" data-back>بازگشت</button>
+  </form>
+</section>
+
+<!-- پیوستن -->
+<section class="screen" id="s-join" hidden>
+  <form class="card form stack" id="joinForm" novalidate>
+    <h2 data-h tabindex="-1">پیوستن به بازی</h2>
+    <div><label class="lb" for="joinName">نام شما</label><input id="joinName" maxlength="14" autocomplete="off" placeholder="مثلاً علی" lang="fa"><p class="err" id="joinErr" role="alert"></p></div>
+    <button class="btn primary lg" id="scanBtn" type="button">اسکن QR میزبان</button>
+    <p class="muted small center">اگر اسکن نشد، کد اتاق را دستی وارد کنید:</p>
+    <div class="row"><input class="grow" id="codeIn" maxlength="9" dir="ltr" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="کد ۵ حرفی" aria-label="کد اتاق" style="text-align:center;letter-spacing:.2em;font-weight:800;text-transform:uppercase"><button class="btn primary" id="joinGo" type="submit">ورود</button></div>
+    <button class="btn link" type="button" data-back>بازگشت</button>
+  </form>
+</section>
+
+<!-- لابی -->
+<section class="screen" id="s-lobby" hidden>
+  <div class="card">
+    <h2 data-h tabindex="-1">لابی بازی</h2>
+    <div class="roomhead">
+      <div><div class="muted small">کد اتاق</div><div class="code" id="roomCode"></div>
+        <div class="row" style="margin-top:8px"><button class="btn sm" id="copyCode">کپی کد</button><button class="btn sm" id="shareBtn">اشتراک‌گذاری لینک</button></div></div>
+      <div class="qr" id="qrBox" role="img" aria-label="کد QR ورود به اتاق"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>بازیکنان <span class="muted" id="pcount"></span></h3>
+    <ul class="plist" id="plist"></ul>
+    <div id="hostCtl" class="stack" style="margin-top:16px">
+      <div><label class="lb" for="durSel">زمان هر دور</label><select id="durSel"><option value="60">۱ دقیقه</option><option value="90">۱٫۵ دقیقه</option><option value="120">۲ دقیقه</option><option value="180">۳ دقیقه</option></select></div>
+      <button class="btn primary lg" id="startBtn">شروع بازی</button>
+      <p class="muted small center" id="startHint"></p>
+      <button class="btn link" id="resetScores" hidden>صفر کردن امتیازها</button>
+    </div>
+    <p class="center muted" id="waitHost" hidden>منتظر شروع بازی توسط میزبان…</p>
+    <div class="center" style="margin-top:10px"><button class="btn link" id="leaveLobby">خروج از بازی</button></div>
+  </div>
+</section>
+
+<!-- انتخاب حرف -->
+<section class="screen" id="s-choose" hidden>
+  <div class="card center">
+    <h2 id="chTitle" data-h tabindex="-1"></h2>
+    <p class="muted" id="chSub"></p>
+    <p class="timer" id="chTimer" aria-live="off"></p>
+    <div class="grid" id="letterGrid" role="group" aria-label="حروف الفبا"></div>
+  </div>
+</section>
+
+<!-- شمارش معکوس -->
+<section class="screen" id="s-count" hidden>
+  <div class="cd" role="status" aria-live="assertive">
+    <div class="muted" id="cdSub">حرف این دور</div>
+    <div class="bigl" id="cdLetter"></div>
+    <div class="cdn" id="cdNum">۳</div>
+  </div>
+</section>
+
+<!-- دور بازی -->
+<section class="screen" id="s-round" hidden>
+  <div class="rhead">
+    <div class="bigl" id="rdLetter" aria-label="حرف این دور"></div>
+    <div style="flex:1"><div class="row" style="justify-content:space-between"><span class="chip" id="rdNo"></span><span class="timer" id="rdTimer" style="font-size:1.4rem"></span></div><div class="bar"><i id="rdBar"></i></div></div>
+  </div>
+  <h2 class="sr" data-h tabindex="-1">پاسخ‌ها</h2>
+  <div class="fields" id="fields"></div>
+  <div class="dock">
+    <span class="muted" id="rdProg" aria-live="polite"></span>
+    <button class="stop" id="stopBtn" disabled>استپ!</button>
+    <button class="btn link" id="forceStop">پایان با پاسخ‌های ناقص</button>
+  </div>
+  <div class="lock" id="lock" hidden role="status"><div><div class="big" id="lockTxt"></div><p style="margin-top:8px">پاسخ‌ها در حال ثبت و بررسی است…</p></div></div>
+</section>
+
+<!-- رأی‌گیری -->
+<section class="screen" id="s-vote" hidden>
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><h2 data-h tabindex="-1">بازبینی پاسخ‌ها</h2><span class="timer" id="vtTimer"></span></div>
+    <p class="muted small" id="vtNote">این کلمه‌ها در فرهنگ‌لغت داخلی نبودند. نویسنده‌ی پاسخ‌ها ناشناس است. رأی اکثریتِ بازیکنانِ واجد شرایط (به‌جز نویسنده) ملاک است؛ در صورت تساوی یا نبودِ رأی، پاسخ رد می‌شود. هر نفر برای هر کلمه یک‌بار رأی می‌دهد.</p>
+    <p class="small" id="vtProg" aria-live="polite"></p>
+  </div>
+  <div id="vcards"></div>
+</section>
+
+<!-- نتایج -->
+<section class="screen" id="s-results" hidden>
+  <div class="banner" id="rsBanner" role="status"><div class="t" data-h tabindex="-1" id="rsT"></div><div id="rsS"></div></div>
+  <div class="card" style="margin-top:14px"><h3>امتیازها</h3><ul class="board" id="rsBoard"></ul></div>
+  <div class="tw" id="rsTable"></div>
+  <div class="card" style="margin-top:14px"><div class="row">
+    <button class="btn primary grow" id="nextBtn">دور بعدی</button>
+    <button class="btn grow" id="toLobbyBtn">بازگشت به لابی</button>
+    <button class="btn grow" id="leaveRes">خروج از بازی</button></div>
+    <p class="muted small center" id="rsWait" hidden style="margin-top:8px">منتظر انتخاب میزبان برای ادامه…</p></div>
+</section>
+</main>
+
+<!-- اسکنر -->
+<div class="ov" id="scanner" hidden role="dialog" aria-modal="true" aria-labelledby="scT">
+  <div class="box">
+    <div class="row" style="justify-content:space-between"><h3 id="scT">اسکن کد QR</h3><button class="btn sm" id="scClose">بستن</button></div>
+    <div class="vwrap"><video id="scVideo" playsinline muted></video><div class="frame"><i></i><b></b></div></div>
+    <p class="center" id="scMsg" role="status"></p>
+    <canvas id="scCanvas" hidden></canvas>
+  </div>
+</div>
+
+<div class="ov" id="modal" hidden role="dialog" aria-modal="true" aria-labelledby="mTxt">
+  <div class="box"><p id="mTxt" style="font-weight:700;margin-bottom:14px"></p><div class="row"><button class="btn danger grow" id="mOk"></button><button class="btn grow" id="mNo"></button></div></div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<canvas id="confetti" aria-hidden="true"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(()=>{
+'use strict';
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+const h=(tag,p={},...kids)=>{const e=document.createElement(tag);for(const k in p){const v=p[k];if(v==null||v===false)continue;if(k==='class')e.className=v;else if(k==='text')e.textContent=v;else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else if(v===true)e.setAttribute(k,'');else e.setAttribute(k,v)}for(const c of kids.flat()){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}return e};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const store=(k,v)=>{try{if(v===undefined)return sessionStorage.getItem(k);if(v===null)sessionStorage.removeItem(k);else sessionStorage.setItem(k,v)}catch{return null}};
+const lstore=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{return null}};
+const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const A={role:null,me:{id:null,name:'',tok:''},peer:null,conn:null,S:null,seq:0,offset:-Infinity,code:null,left:false,reconnecting:false,key:null,vp:null,screen:null,ans:[],ansR:-1,sig:'ok',lastRx:0};
+
+/*CORE-START*/
+const VER=1,MAX=8,MAXLEN=24,CHOOSE_MS=25000;
+const CATS=['اسم','فامیل','شهر','کشور','غذا','میوه','حیوان','رنگ','شغل','وسیله'];
+const LETTERS=[...'ابپتجچحخدرزسشصطعغفقکگلمنوهی'];
+const fa=n=>String(n).replace(/\d/g,d=>'۰۱۲۳۴۵۶۷۸۹'[d]);
+const rnd=n=>Math.floor(Math.random()*n);
+const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=rnd(i+1);[a[i],a[j]]=[a[j],a[i]]}return a};
+const ALNUM='abcdefghijkmnpqrstuvwxyz23456789';
+const uid=(n=16)=>{const a=new Uint8Array(n);crypto.getRandomValues(a);return [...a].map(x=>ALNUM[x%ALNUM.length]).join('')};
+const MAP={'ي':'ی','ى':'ی','ك':'ک','ة':'ه','ۀ':'ه','أ':'ا','إ':'ا','ؤ':'و','ئ':'ی'};
+function norm(s){return String(s==null?'':s).normalize('NFKC').replace(/[\u064B-\u065F\u0670\u0640\u0621\u200e\u200f\u061c]/g,'').replace(/[يىكةۀأإؤئ]/g,c=>MAP[c]).replace(/\s+/g,' ')}
+const key=s=>norm(s).replace(/[\s\u200c]/g,'').replace(/آ/g,'ا');
+const lead=s=>{const t=norm(s).replace(/^[\s\u200c]+/,'');return (t[0]||'').replace('آ','ا')};
+const PRE=/^[آابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی\s\u200c]+$/;
+const RAW={
+'اسم':`آرش آرمان آرین آزاده آیدا آتنا ابراهیم احسان احمد اردلان ارسلان اسماعیل امیر امید امین انوش ایمان ایرج ایلیا اکبر الهام الناز الهه امیرعلی بابک بهرام بهزاد بهنام بهمن بهار بیژن بنفشه بهاره پارسا پرویز پژمان پویا پوریا پریسا پری پرستو پگاه پونه تینا ترانه تورج تهمینه ثریا جمشید جواد جلال جعفر جمیله حامد حسن حسین حمید حمیدرضا حسام حمیرا خسرو خشایار خدیجه دانیال داریوش داود درسا دنیا دانا دریا رضا رامین رامتین رها رویا روزبه رستم رودابه ریحانه زهرا زهره زینب ژاله ژیلا سارا ساسان سامان سجاد سعید سلمان سهراب سیاوش سینا سپیده ستاره سمیرا سوسن سودابه شاهین شهرام شهین شیدا شیرین شقایق شبنم صادق صدف صبا طاها طاهره عارف عباس علی عسل عاطفه عماد غزل غلامرضا فاطمه فرهاد فرزاد فرید فرشاد فرشته فرناز کاوه کامران کامیار کیوان کیانوش کسری کوروش کیمیا کیا گلناز گلاره گیتی لیلا لادن مانی مجید محسن محمد محمود مسعود مصطفی مهدی مهران مهرداد مهرناز مریم مینا مهسا میلاد ملیکا ناصر نادر نازنین نرگس نسترن نیما نیلوفر نگار نیکی هادی هومن هما هانیه همایون هدی یاسمن یاسر یاشار یگانه یوسف یلدا`,
+'فامیل':`احمدی اکبری ابراهیمی اسدی امیری انصاری اکبرزاده بهرامی بهشتی باقری بابایی پورمحمدی پناهی پارسا پاکزاد تقوی ترابی توکلی جعفری جلالی جوادی حسینی حیدری حسن_زاده خسروی خلیلی خاکی دهقان داوودی درخشان دانایی رضایی رحیمی رحمانی رستمی رضوی زارعی زمانی زنده_دل سلطانی سلیمانی سعیدی صادقی صفوی شریفی شجاعی شیرازی شکوهی طاهری عباسی علوی عسگری غفاری فرهادی فتحی فروغی قاسمی قربانی کریمی کاظمی کیانی گلی گودرزی لطفی مرادی موسوی محمدی مهدوی میرزایی نوری نادری نجفی نصیری هاشمی همتی یزدانی یوسفی`,
+'شهر':`آبادان آمل آستارا آبیک اراک اردبیل ارومیه اصفهان اهواز ایلام ایذه بابل بجنورد بندرعباس بوشهر بیرجند بم بانه بروجرد بابلسر پاسارگاد پارس_آباد پاوه تهران تبریز تاکستان تربت جهرم جیرفت چابهار چالوس خرم_آباد خوی خمین خرمشهر دزفول دامغان دماوند رشت رفسنجان رامسر ساری سمنان سنندج سبزوار سیرجان شیراز شیروان شهرکرد شوشتر قم قزوین قائم_شهر کرج کرمان کرمانشاه کاشان کاشمر کیش گرگان گنبد گچساران لاهیجان لار مشهد ملایر مراغه میانه مهاباد نیشابور نجف_آباد نطنز نوشهر همدان یزد یاسوج زاهدان زنجان زابل پاریس لندن برلین رم مسکو توکیو دبی استانبول بغداد باکو بارسلون ونیز واشنگتن نیویورک ونکوور ایروان آنکارا آتن مادرید وین کابل دهلی پکن سئول سیدنی تورنتو آمستردام ژنو لیسبون پراگ بوداپست ورشو قاهره کراچی لاهور ریاض دوحه مسقط بیروت دمشق عمان کویت بخارا سمرقند تاشکند اسلو استکهلم هلسینکی کپنهاگ`,
+'کشور':`آلمان آمریکا آرژانتین استرالیا اسپانیا اتریش اکوادور ارمنستان ازبکستان اندونزی افغانستان الجزایر امارات ایران ایتالیا ایرلند اسلواکی اوکراین انگلیس اردن اتیوپی بلژیک برزیل بلغارستان بحرین بنگلادش بولیوی پاکستان پرتغال پرو پاناما تایلند ترکیه ترکمنستان تونس تاجیکستان تانزانیا جامائیکا چین چک چاد دانمارک روسیه رومانی رواندا زیمبابوه ژاپن سوئد سوئیس سوریه سنگاپور سودان سومالی سریلانکا سنگال شیلی صربستان عراق عمان عربستان غنا فرانسه فنلاند فیلیپین فلسطین قطر قزاقستان قبرس کانادا کره کویت کوبا کلمبیا کنیا کامرون گرجستان گینه لبنان لهستان لیبی لیتوانی لوکزامبورگ مصر مکزیک مالزی مراکش مجارستان مغولستان مالی نروژ نیوزیلند نیجریه نپال نیکاراگوئه هند هلند هائیتی یونان یمن ونزوئلا ویتنام کرواسی اسلوونی استونی لتونی ایسلند مالت`,
+'غذا':`آش آبگوشت آش_رشته املت اشکنه الویه ته_چین تهچین چلوکباب چلوگوشت جوجه_کباب خورشت خورش خوراک دلمه دیزی رشته_پلو زرشک_پلو سوپ سمبوسه سالاد ساندویچ سیب_زمینی_سرخ_کرده شیرینی_پلو شامی شله_زرد شیربرنج فسنجان قورمه_سبزی قیمه کباب کوکو کتلت کشک_بادمجان کلم_پلو لوبیا_پلو ماکارونی میرزاقاسمی نان نخودچی همبرگر هلیم پیتزا پلو پاستا باقلاپلو برنج بامیه بورک پنیر پیراشکی حلیم حلوا خاگینه دمپخت سبزی_پلو سمنو سوشی شنیسل عدس_پلو عدسی فلافل کباب_کوبیده کوبیده کالباس لازانیا مرغ ماهی نودل ماست_و_خیار ماستوخیار کشک بادمجان قیمه_بادمجان دوغ ترشی زیتون کلوچه گز سوهان باقلوا زولبیا بامیه آبگوشت_بزباش بزباش`,
+'میوه':`آلبالو آلو انار انجیر انگور آناناس اناناس ازگیل بالنگ به بادام پرتقال پاپایا توت توت_فرنگی تمر_هندی خرما خربزه سیب شلیل شاه_توت فندق فالسه قیسی کیوی گیلاس گلابی گریپ_فروت گوجه گوجه_سبز لیمو لیمو_ترش لیمو_شیرین موز نارنگی نارگیل نارنج هلو هندوانه طالبی انبه آووکادو پسته کنار عناب زرد_آلو زردآلو ازگیل تمشک شیرین_بیان انجیر_سیاه خرمالو توت_سیاه کاکایی لیچی نخل پیکان`,
+'حیوان':`اسب الاغ اردک آهو آفتاب_پرست خرس خروس خرگوش خفاش خوک دلفین دایناسور راسو روباه زرافه زنبور زنبور_عسل سگ سنجاب سوسمار شیر شتر شتر_مرغ شغال شاهین طوطی عقاب عنکبوت عقرب غاز غزال فیل فک قورباغه قو قناری کبوتر کروکودیل کلاغ کرگدن گربه گوزن گاو گوسفند گرگ گنجشک گوریل لاک_پشت مار مرغ ماهی موش میمون مورچه مگس مرغابی نهنگ پلنگ پنگوئن پروانه پشه پرستو بز بلبل بوقلمون بوفالو ببر بره پاندا تمساح جغد جوجه چلپاسه حلزون درنا سمور آهو آرمادیلو اردک_ماهی عنکبوت کانگورو کوالا گراز گاومیش یوزپلنگ یوز یابو کفتار کوسه هشت_پا هدهد ملخ مرغ_عشق قمری کلاغ_سیاه لک_لک`,
+'رنگ':`آبی آبی_روشن ارغوانی استخوانی بنفش بژ پرتقالی زرد زرشکی زمردی سبز سفید سرخ سیاه سرمه_ای شیری صورتی طلایی طوسی عنابی فیروزه_ای قرمز قهوه_ای کرم کبود کاراملی گلبهی لیمویی مشکی مسی نارنجی نقره_ای نیلی نباتی یشمی یاسی هلویی خاکستری خاکی خردلی لاجوردی نخودی یاقوتی ازرق`,
+'شغل':`آشپز آهنگر آرایشگر آتش_نشان آرشیتکت استاد اپراتور برنامه_نویس بقال بنا باغبان بازیگر بازرس پزشک پرستار پلیس پیلوت پیشخدمت پستچی تاجر تعمیرکار تکنسین جراح جوشکار حسابدار خبرنگار خیاط خلبان خواننده دندانپزشک دکتر دامپزشک دبیر دلال راننده رستوران_دار رییس رئیس رفتگر ریاضیدان زرگر زمین_شناس سرباز سرآشپز سلمانی شاعر شیمیدان شهردار شیرینی_پز صراف صنعتگر طراح طلافروش عکاس عطار غواص فروشنده فیزیکدان فیلمبردار قصاب قاضی کارگر کشاورز کارمند کتابدار کارگردان گوینده گلفروش لوله_کش مهندس معلم مکانیک مدیر مربی مترجم موسیقیدان نقاش نجار نویسنده نانوا نگهبان نظافتچی وکیل وزیر ورزشکار هنرمند هنرپیشه یخچال_ساز اپتومتریست استاد_دانشگاه ادیب داروساز دانشمند دانشجو زیست_شناس فیزیوتراپ`,
+'وسیله':`آینه آچار آسانسور آیفون اتو اتومبیل اجاق استکان انبر بشقاب بیل بخاری بالش برس بادبزن پنکه پتو پیچ_گوشتی پرده تلفن تلویزیون تخت تیغ تبر ترازو جارو جا_کلیدی جامدادی چراغ چاقو چکش چتر چنگال خودکار خودرو خط_کش خاک_انداز دفتر دوچرخه دیوار دریل دوربین رادیو رایانه ریموت زنگ ساعت سشوار سماور سینی شانه شمع شلنگ صندلی صابون طناب عینک فرش فلاسک فرچه قاشق قیچی قفل قابلمه کتاب کلید کفش کیف کامپیوتر کوله_پشتی گوشی گلدان لپ_تاپ لیوان لامپ مداد مبل میز موبایل مسواک ماشین_لباسشویی مایکروویو نردبان نیمکت هواپیما هدفون یخچال آبمیوه_گیر آبپاش ظرف قلم ماژیک مانیتور کیبورد ماوس شارژر کابل چاپگر پرینتر`};
+const DICT={};for(const c of CATS)DICT[c]=new Set(RAW[c].split(/\s+/).filter(Boolean).map(w=>key(w.replace(/_/g,''))));
+function judge(raw,cat,L){
+  const t=norm(raw).trim();
+  if(!t)return{st:'empty',note:'خالی'};
+  if(!PRE.test(t))return{st:'invalid',note:'فقط حروف فارسی مجاز است'};
+  if(lead(t)!==L)return{st:'invalid',note:'با «'+L+'» شروع نشده'};
+  const k=key(t);
+  if(k.length<2||/^(.)\1+$/.test(k)||/(.)\1\1/.test(k)||t.split(/\s+/).length>3)return{st:'invalid',note:'کلمه‌ی معتبر نیست'};
+  if(DICT[cat].has(k))return{st:'valid',note:'تأیید با فرهنگ‌لغت'};
+  return{st:'unknown',note:'ناشناخته؛ نیازمند رأی'};
+}
+const cleanAns=a=>CATS.map((_,i)=>String(Array.isArray(a)&&a[i]!=null?a[i]:'').replace(/[\u0000-\u001f\u007f]/g,'').slice(0,MAXLEN));
+const blank=()=>CATS.map(()=> '');
+const cleanName=v=>String(v==null?'':v).replace(/\s+/g,' ').trim();
+const nameOk=v=>{v=cleanName(v);return v.length>=2&&v.length<=14&&/^[\p{L}\p{M}\p{N} _\-\u200c]+$/u.test(v)};
+
+/* ---------- host game logic (authoritative) ---------- */
+let G=null;const HT={};
+const timer=(n,ms,f)=>{clearTimeout(HT[n]);HT[n]=setTimeout(f,Math.max(0,ms))};
+const clearTimer=n=>{clearTimeout(HT[n]);delete HT[n]};
+const clearTimers=()=>{for(const n in HT)clearTimeout(HT[n])};
+const onlineIds=()=>G.order.filter(id=>G.players[id].online);
+function newG(room,hostId,name,tok){
+  G={room,hostId,seq:0,phase:'lobby',round:0,letter:null,chooser:null,chosenCycle:[],usedLetters:[],players:{},order:[],dur:120,live:{},finals:{},answers:null,cells:null,startAt:0,endAt:0,chooseEnd:0,collectEnd:0,voteEnd:0,stopper:null,cards:[],results:null};
+  G.players[hostId]={id:hostId,name,tok,online:true,score:0,last:0,seen:Date.now(),conn:null};G.order.push(hostId);return G;
+}
+function snap(pid){
+  const voting=G.phase==='voting';let done=0,total=0;
+  if(voting)for(const c of G.cards){done+=Object.keys(c.votes).length;total+=c.elig.length}
+  return{t:'state',seq:G.seq,hostNow:Date.now(),room:G.room,phase:G.phase,round:G.round,letter:G.letter,chooser:G.chooser,chooseEnd:G.chooseEnd,startAt:G.startAt,endAt:G.endAt,collectEnd:G.collectEnd,voteEnd:G.voteEnd,stopper:G.stopper,dur:G.dur,hostId:G.hostId,usedLetters:G.usedLetters,
+    players:G.order.map(id=>{const p=G.players[id];return{id,name:p.name,online:p.online,score:p.score,last:p.last}}),
+    cards:voting?G.cards.map(c=>({id:c.id,cat:c.cat,word:c.word,own:c.authors.includes(pid),can:c.elig.includes(pid),vote:c.votes[pid]===undefined?null:c.votes[pid]})):null,
+    prog:voting?{done,total}:null,results:G.phase==='results'?G.results:null};
+}
+function bump(){
+  if(!G)return;G.seq++;
+  for(const id of G.order.slice()){const p=G.players[id];if(!p)continue;
+    if(id===G.hostId)applyState(snap(id));
+    else if(p.online&&p.conn&&p.conn.open){try{p.conn.send(snap(id))}catch{}}}
+}
+function startRound(){
+  const on=onlineIds();if(on.length<2)return;
+  clearTimers();G.round++;G.letter=null;G.live={};G.finals={};G.answers=null;G.cards=[];G.results=null;G.stopper=null;G.cells=null;
+  let cand=on.filter(id=>!G.chosenCycle.includes(id));
+  if(!cand.length){G.chosenCycle=[];cand=on}
+  G.chooser=cand[rnd(cand.length)];G.chosenCycle.push(G.chooser);
+  G.phase='choose';G.chooseEnd=Date.now()+CHOOSE_MS;timer('choose',CHOOSE_MS,autoLetter);bump();
+}
+function freeLetters(){let f=LETTERS.filter(l=>!G.usedLetters.includes(l));if(!f.length){G.usedLetters=[];f=LETTERS.slice()}return f}
+function autoLetter(){if(G.phase!=='choose')return;const f=freeLetters();setLetter(f[rnd(f.length)])}
+function setLetter(l){
+  if(G.phase!=='choose')return;clearTimer('choose');
+  G.letter=l;G.usedLetters.push(l);G.phase='countdown';G.startAt=Date.now()+3400;G.endAt=G.startAt+G.dur*1000;
+  timer('begin',3400,beginRound);bump();
+}
+function beginRound(){
+  if(G.phase!=='countdown')return;G.phase='round';
+  timer('end',G.endAt-Date.now(),()=>endRound(null));bump();
+}
+function endRound(pid){
+  if(G.phase!=='round')return;
+  clearTimer('end');G.phase='collect';G.stopper=pid;G.collectEnd=Date.now()+1500;G.finals={};
+  if(pid)G.finals[pid]=cleanAns(G.live[pid]);
+  timer('collect',1500,freeze);bump();checkCollect();
+}
+function checkCollect(){if(G.phase!=='collect')return;if(onlineIds().every(id=>id in G.finals))freeze()}
+function freeze(){
+  if(G.phase!=='collect')return;clearTimer('collect');
+  const a={};for(const id of G.order)a[id]=G.finals[id]||G.live[id]||blank();
+  G.answers=a;evaluate();
+}
+function evaluate(){
+  const L=G.letter,cells={},map=new Map();
+  for(const pid of G.order){
+    cells[pid]=CATS.map((cat,i)=>{
+      const raw=cleanAns(G.answers[pid])[i],j=judge(raw,cat,L),c={text:raw.trim(),st:j.st,note:j.note,k:key(raw)};
+      if(j.st==='unknown'){
+        const ck=i+'|'+c.k;let card=map.get(ck);
+        if(!card){card={id:'',cat,word:c.text,k:c.k,authors:[],votes:{},elig:[]};map.set(ck,card)}
+        card.authors.push(pid);c.card=card;
+      }
+      return c;
+    });
+  }
+  G.cells=cells;
+  const cards=shuffle([...map.values()]);
+  if(!cards.length){G.cards=[];return finalize()}
+  const on=onlineIds();
+  cards.forEach(c=>{c.id='c'+uid(6);c.elig=on.filter(id=>!c.authors.includes(id))});
+  G.cards=cards;G.phase='voting';
+  const ms=Math.min(75,15+8*cards.length)*1000;G.voteEnd=Date.now()+ms;
+  timer('vote',ms,finalize);bump();checkVotes();
+}
+function checkVotes(){
+  if(G.phase!=='voting')return;
+  if(G.cards.every(c=>c.elig.every(id=>!G.players[id]||!G.players[id].online||id in c.votes)))finalize();
+}
+function finalize(){
+  if(G.phase!=='voting'&&G.phase!=='collect')return;
+  clearTimer('vote');
+  for(const c of G.cards){
+    const v=Object.values(c.votes),y=v.filter(x=>x).length,n=v.length-y;c.y=y;c.n=n;
+    if(!c.elig.length){c.ok=true;c.note='تأیید همگانی (همه‌ی بازیکنان همین پاسخ را نوشته‌اند)'}
+    else{c.ok=y>n;c.note=y+n===0?'رأیی ثبت نشد ⇒ رد':'رأی جمع: '+fa(y)+' درست، '+fa(n)+' نادرست'+(y===n?' (تساوی ⇒ رد)':'')}
+  }
+  const ids=G.order.filter(id=>G.cells[id]);
+  for(const id of ids)for(const c of G.cells[id])if(c.card){c.st=c.card.ok?'accepted':'rejected';c.note=c.card.note}
+  const rt={};ids.forEach(id=>rt[id]=0);
+  const rows=CATS.map((cat,i)=>{
+    const cnt={};
+    for(const id of ids){const c=G.cells[id][i];if(c.st==='valid'||c.st==='accepted')cnt[c.k]=(cnt[c.k]||0)+1}
+    const cells={};
+    for(const id of ids){
+      const c=G.cells[id][i];let pts=0;
+      if(c.st==='valid'||c.st==='accepted')pts=cnt[c.k]>1?5:10;
+      rt[id]+=pts;cells[id]={text:c.text,pts,st:c.st,note:c.note+(pts===5?' · پاسخ تکراری':'')};
+    }
+    return{cat,cells};
+  });
+  for(const id of ids){const p=G.players[id];if(p){p.score+=rt[id];p.last=rt[id]}}
+  const mx=Math.max(0,...ids.map(id=>rt[id]));
+  G.results={round:G.round,letter:G.letter,rows,timeUp:!G.stopper,stopper:G.stopper&&G.players[G.stopper]?G.players[G.stopper].name:null,
+    players:ids.map(id=>({id,name:G.players[id].name,round:rt[id],total:G.players[id].score})),winners:mx>0?ids.filter(id=>rt[id]===mx):[]};
+  G.phase='results';bump();
+}
+function removePlayer(id,why){
+  const p=G.players[id];if(!p)return;
+  if(p.conn){const c=p.conn;p.conn=null;try{if(why==='kicked')c.send({t:'kicked'})}catch{}setTimeout(()=>{try{c.close()}catch{}},300)}
+  delete G.players[id];G.order=G.order.filter(x=>x!==id);G.chosenCycle=G.chosenCycle.filter(x=>x!==id);bump();
+}
+function markOffline(id,left){
+  const p=G.players[id];if(!p||!p.online&&!left)return;
+  p.online=false;if(p.conn){const c=p.conn;p.conn=null;try{c.close()}catch{}}
+  if(G.phase==='choose'&&G.chooser===id)autoLetter();
+  else if(G.phase==='collect')checkCollect();
+  else if(G.phase==='voting')checkVotes();
+  bump();
+}
+function completeAns(a){return cleanAns(a).every(v=>v.trim()&&lead(v)===G.letter)}
+function handle(pid,m){
+  const p=G.players[pid];if(!p||!m||typeof m!=='object')return;
+  p.seen=Date.now();const host=pid===G.hostId;
+  switch(m.t){
+    case'ping':if(p.conn&&p.conn.open)try{p.conn.send({t:'pong',now:Date.now()})}catch{}break;
+    case'ans':if(G.phase==='round'&&m.r===G.round)G.live[pid]=cleanAns(m.a);break;
+    case'stop':
+      if(G.phase==='round'&&m.r===G.round){
+        G.live[pid]=cleanAns(m.a);
+        if(m.force===true||completeAns(m.a))endRound(pid);
+      }break;
+    case'final':if(G.phase==='collect'&&m.r===G.round&&!(pid in G.finals)){G.finals[pid]=cleanAns(m.a);checkCollect()}break;
+    case'letter':
+      if(G.phase==='choose'&&m.r===G.round&&pid===G.chooser&&LETTERS.includes(m.l)){
+        if(G.usedLetters.includes(m.l)&&freeLetters().length&&G.usedLetters.includes(m.l))return;
+        setLetter(m.l);
+      }break;
+    case'vote':
+      if(G.phase==='voting'&&m.r===G.round&&typeof m.v==='boolean'){
+        const c=G.cards.find(c=>c.id===m.c);
+        if(c&&c.elig.includes(pid)&&!c.authors.includes(pid)&&!(pid in c.votes)){c.votes[pid]=m.v;bump();checkVotes()}
+      }break;
+    case'leave':
+      if(host)break;
+      if(G.phase==='lobby'||G.phase==='results')removePlayer(pid,'left');else markOffline(pid,true);break;
+    case'start':if(host&&G.phase==='lobby')startRound();break;
+    case'next':if(host&&G.phase==='results')startRound();break;
+    case'lobby':if(host&&G.phase==='results'){clearTimers();G.phase='lobby';G.letter=null;G.cards=[];G.results=null;G.stopper=null;bump()}break;
+    case'kick':if(host&&(G.phase==='lobby'||G.phase==='results')&&typeof m.id==='string'&&m.id!==G.hostId)removePlayer(m.id,'kicked');break;
+    case'dur':if(host&&G.phase==='lobby'&&[60,90,120,180].includes(m.v)){G.dur=m.v;bump()}break;
+    case'reset':if(host&&G.phase==='lobby'){for(const id of G.order){G.players[id].score=0;G.players[id].last=0}G.usedLetters=[];bump()}break;
+  }
+}
+/*CORE-END*/
+
+/* ---------- UI helpers ---------- */
+const ERR={
+  lib:'این نسخه برای QR به کتابخانه‌ی دانلودی نیاز ندارد. اگر اتصال بازی برقرار نشد، کد اتاق را دستی وارد کنید.',
+  net:'اتصال به سرور سیگنالینگ برقرار نشد. اینترنت را بررسی کنید.',
+  room:'اتاقی با این کد پیدا نشد یا منقضی شده است.',
+  rtc:'مرورگر شما از WebRTC پشتیبانی نمی‌کند.',
+  name:'نام باید ۲ تا ۱۴ نویسه و فقط شامل حروف، عدد و فاصله باشد.',
+  code:'کد اتاق معتبر نیست. کد ۵ نویسه‌ای را درست وارد کنید.',
+  qr:'این QR مربوط به این بازی نیست.',
+  denied:'دسترسی به دوربین رد شد. اجازه‌ی دوربین را در تنظیمات مرورگر بدهید یا کد را دستی وارد کنید.',
+  nocam:'دوربینی پیدا نشد. کد اتاق را دستی وارد کنید.',
+  insecure:'دوربین فقط روی HTTPS یا localhost کار می‌کند. کد اتاق را دستی وارد کنید.',
+  full:'ظرفیت این اتاق تکمیل است.',started:'بازی در این اتاق شروع شده است.',dupname:'این نام در اتاق استفاده شده است؛ نام دیگری انتخاب کنید.',badname:'نام واردشده معتبر نیست.',version:'نسخه‌ی بازی با میزبان سازگار نیست؛ صفحه را تازه کنید.'
+};
+function peerErr(e){
+  const t=e&&e.type;
+  if(t==='reject')return ERR[e.why]||ERR.badname;
+  if(t==='peer-unavailable')return ERR.room;
+  if(t==='browser-incompatible')return ERR.rtc;
+  if(t==='lib')return ERR.lib;
+  if(t==='timeout'||t==='closed')return 'اتصال به اتاق برقرار نشد. کد را بررسی کنید و دوباره تلاش کنید.';
+  return ERR.net;
+}
+function toast(msg,kind=''){const t=h('div',{class:'toast '+kind,text:msg});$('#toasts').append(t);setTimeout(()=>t.remove(),4800)}
+function show(id){
+  $$('.screen').forEach(s=>{
+    if(s.id===id){if(s.hidden){s.hidden=false;s.classList.remove('in');void s.offsetWidth;s.classList.add('in');const hd=$('[data-h]',s);if(hd)hd.focus({preventScroll:true})}}
+    else s.hidden=true;
+  });
+  A.screen=id;$('#brand').hidden=id==='s-home';
+}
+function confirmBox(msg,ok='تأیید',no='انصراف'){
+  return new Promise(res=>{
+    const m=$('#modal'),prev=document.activeElement;$('#mTxt').textContent=msg;$('#mOk').textContent=ok;$('#mNo').textContent=no;m.hidden=false;
+    const done=v=>{m.hidden=true;document.removeEventListener('keydown',kd);prev&&prev.focus&&prev.focus();res(v)};
+    const kd=e=>{if(e.key==='Escape')done(false);if(e.key==='Tab'){const b=[$('#mOk'),$('#mNo')],i=b.indexOf(document.activeElement);e.preventDefault();b[(i+(e.shiftKey?-1:1)+2)%2].focus()}};
+    document.addEventListener('keydown',kd);$('#mOk').onclick=()=>done(true);$('#mNo').onclick=()=>done(false);$('#mNo').focus();
+  });
+}
+/* sound */
+let AC=null,soundOn=lstore('esmf-snd')!=='0';
+function beep(f=660,d=.12,type='sine',vol=.08,delay=0){
+  if(!soundOn)return;
+  try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume();
+    const o=AC.createOscillator(),g=AC.createGain(),t=AC.currentTime+delay;o.type=type;o.frequency.value=f;
+    g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(vol,t+.01);g.gain.exponentialRampToValueAtTime(.0001,t+d);
+    o.connect(g);g.connect(AC.destination);o.start(t);o.stop(t+d+.02)}catch{}
+}
+const sfx={tick:()=>beep(520,.1),go:()=>{beep(784,.15);beep(1046,.22,'sine',.08,.13)},stop:()=>beep(300,.3,'square',.05),vote:()=>beep(620,.08),win:()=>[523,659,784,1046].forEach((f,i)=>beep(f,.28,'sine',.08,i*.13))};
+function setSound(on){soundOn=on;lstore('esmf-snd',on?'1':'0');$('#btnSound').setAttribute('aria-pressed',on)}
+let cfRaf=0;
+function confetti(){
+  if(REDUCED)return;const c=$('#confetti'),x=c.getContext('2d');c.width=innerWidth;c.height=innerHeight;cancelAnimationFrame(cfRaf);
+  const cols=['#0fa89b','#1d4f9c','#e0a526','#f1e9d3','#c93a4d'];
+  const P=Array.from({length:90},()=>({x:Math.random()*c.width,y:-20-Math.random()*c.height*.6,vx:(Math.random()-.5)*2,vy:2+Math.random()*3,s:5+Math.random()*6,r:Math.random()*6,vr:(Math.random()-.5)*.3,c:cols[rnd(cols.length)]}));
+  const t0=performance.now();
+  (function f(t){x.clearRect(0,0,c.width,c.height);for(const p of P){p.x+=p.vx;p.y+=p.vy;p.r+=p.vr;x.save();x.translate(p.x,p.y);x.rotate(p.r);x.fillStyle=p.c;x.fillRect(-p.s/2,-p.s/2,p.s,p.s*.6);x.restore()}
+    if(t-t0<3500)cfRaf=requestAnimationFrame(f);else x.clearRect(0,0,c.width,c.height)})(t0);
+}
+/* theme + background */
+function setTheme(t){document.documentElement.dataset.theme=t;lstore('esmf-theme',t);$('meta[name=theme-color]').content=t==='dark'?'#0b1829':'#0fa89b'}
+setTheme(lstore('esmf-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'));
+setSound(soundOn);
+(()=>{const bg=$('#bg'),L=[...'ابپتجچحخدرزسشعفقکگلمنوهی'];for(let i=0;i<16;i++){const s=h('span',{class:'bgl',text:L[rnd(L.length)]});s.style.cssText=`left:${rnd(96)}%;top:${rnd(92)}%;font-size:${40+rnd(90)}px;--d:${6+rnd(8)}s;--r0:${rnd(50)-25}deg;animation-delay:-${rnd(8)}s`;bg.append(s)}})();
+
+/* ---------- networking ---------- */
+// Worldwide networking configuration. This is intentionally isolated from the game/UI.
+// PeerJS Cloud handles signaling; STUN helps browsers connect across different networks.
+// A TURN relay is still needed for some restrictive NATs/firewalls. Add provider-issued,
+// short-lived TURN credentials to TURN_ICE_SERVERS if you later configure a TURN provider.
+// Never publish a permanent TURN secret in a public GitHub Pages file.
+const TURN_ICE_SERVERS=[];
+const ICE={iceServers:[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'},
+  {urls:'stun:stun2.l.google.com:19302'},
+  {urls:'stun:stun3.l.google.com:19302'},
+  {urls:'stun:stun4.l.google.com:19302'},
+  {urls:'stun:global.stun.twilio.com:3478'},
+  ...TURN_ICE_SERVERS
+],sdpSemantics:'unified-plan'};
+const PEER_OPTIONS={host:'0.peerjs.com',port:443,path:'/',secure:true,config:ICE,debug:0,pingInterval:5000};
+const PREFIX='esmfamil-v1-',CODE_CH='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const genCode=()=>{const a=new Uint8Array(5);crypto.getRandomValues(a);return [...a].map(x=>CODE_CH[x%CODE_CH.length]).join('')};
+function normCode(v){return String(v||'').replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[^A-Za-z0-9]/g,'').toUpperCase()}
+const codeOk=c=>c.length===5&&[...c].every(ch=>CODE_CH.includes(ch));
+function parseQR(t){
+  t=String(t||'').trim();let m=t.match(/^ESMF:([A-Za-z0-9]{5})$/);
+  if(m&&codeOk(m[1].toUpperCase()))return m[1].toUpperCase();
+  try{const u=new URL(t);if(u.protocol==='https:'||u.protocol==='http:'){const m2=(u.hash||'').match(/room=([A-Za-z0-9]{5})(?:&|$)/);if(m2&&codeOk(m2[1].toUpperCase()))return m2[1].toUpperCase()}}catch{}
+  return null;
+}
+function openPeer(id){
+  return new Promise((res,rej)=>{
+    if(!window.Peer)return rej({type:'lib'});
+    let done=false;const p=new Peer(id,PEER_OPTIONS);
+    const to=setTimeout(()=>{if(!done){done=true;try{p.destroy()}catch{}rej({type:'timeout'})}},20000);
+    p.on('open',()=>{done=true;clearTimeout(to);res(p)});
+    p.on('error',e=>{if(!done){done=true;clearTimeout(to);try{p.destroy()}catch{}rej(e)}else hostPeerError(e)});
+  });
+}
+let wl=null;
+async function keepAwake(){try{if(navigator.wakeLock)wl=await navigator.wakeLock.request('screen')}catch{}}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&A.role==='host')keepAwake();if(document.hidden)closeScanner()});
+function setBusy(b,btn){btn.disabled=b}
+async function createRoom(name){
+  const btn=$('#hostGo');setBusy(true,btn);
+  try{
+    let peer=null,code;
+    for(let i=0;i<6&&!peer;i++){code=genCode();try{peer=await openPeer(PREFIX+code)}catch(e){if(e&&e.type==='unavailable-id')continue;throw e}}
+    if(!peer)throw{type:'unavailable-id'};
+    initHost(peer,code,name);
+  }catch(e){$('#hostErr').textContent=peerErr(e)}
+  finally{setBusy(false,btn)}
+}
+let sweepT=0;
+function initHost(peer,code,name){
+  A.role='host';A.left=false;A.peer=peer;A.code=code;A.sig='ok';A.key=null;
+  A.me={id:uid(10),name,tok:uid(24)};newG(code,A.me.id,name,A.me.tok);
+  peer.on('connection',conn=>{
+    const to=setTimeout(()=>{if(!conn.__pid)try{conn.close()}catch{}},8000);
+    conn.on('data',d=>{
+      if(!G||!d||typeof d!=='object'||typeof d.t!=='string')return;
+      if(!conn.__pid){if(d.t==='hello')onHello(conn,d);return}
+      const p=G.players[conn.__pid];if(!p||p.conn!==conn)return;
+      handle(conn.__pid,d);
+    });
+    conn.on('close',()=>{clearTimeout(to);if(G&&conn.__pid){const p=G.players[conn.__pid];if(p&&p.conn===conn)markOffline(conn.__pid)}});
+    conn.on('error',()=>{});
+  });
+  peer.on('disconnected',()=>{A.sig='warn';pillUpdate();setTimeout(()=>{try{if(!peer.destroyed)peer.reconnect()}catch{}},1500)});
+  peer.on('open',()=>{A.sig='ok';pillUpdate()});
+  clearInterval(sweepT);
+  sweepT=setInterval(()=>{if(!G)return;const n=Date.now();for(const id of G.order){const p=G.players[id];if(id!==G.hostId&&p.online&&n-p.seen>13000)markOffline(id)}},3000);
+  keepAwake();A.S=null;bump();
+}
+function hostPeerError(e){
+  if(!e)return;if(['network','server-error','socket-error','socket-closed'].includes(e.type)){A.sig='warn';pillUpdate()}
+}
+function onHello(conn,m){
+  const rej=why=>{try{conn.send({t:'reject',why})}catch{}setTimeout(()=>{try{conn.close()}catch{}},300)};
+  const name=cleanName(m.name);
+  if(m.v!==VER)return rej('version');
+  if(!nameOk(name)||typeof m.pid!=='string'||!/^[a-z0-9]{10}$/.test(m.pid)||typeof m.tok!=='string'||!/^[a-z0-9]{24}$/.test(m.tok))return rej('badname');
+  let p=G.players[m.pid];
+  if(p){
+    if(p.tok!==m.tok||m.pid===G.hostId)return rej('badname');
+    if(p.conn&&p.conn!==conn){const o=p.conn;p.conn=null;try{o.close()}catch{}}
+    p.conn=conn;p.online=true;p.seen=Date.now();
+  }else{
+    if(G.phase!=='lobby')return rej('started');
+    if(G.order.length>=MAX)return rej('full');
+    const k=key(name).toLowerCase();
+    if(G.order.some(id=>key(G.players[id].name).toLowerCase()===k))return rej('dupname');
+    p=G.players[m.pid]={id:m.pid,name,tok:m.tok,online:true,score:0,last:0,seen:Date.now(),conn};G.order.push(m.pid);
+  }
+  conn.__pid=m.pid;
+  try{conn.send({t:'welcome'})}catch{}
+  bump();
+}
+/* client */
+function teardownPeer(){try{if(A.conn)A.conn.close()}catch{}try{if(A.peer)A.peer.destroy()}catch{}A.conn=null;A.peer=null}
+function connectClient(code,name,pid,tok){
+  return new Promise((resolve,reject)=>{
+    teardownPeer();
+    if(!window.Peer)return reject({type:'lib'});
+    let settled=false;
+    const fail=e=>{if(settled)return;settled=true;clearTimeout(to);try{peer.destroy()}catch{}reject(e)};
+    const peer=new Peer(undefined,PEER_OPTIONS);A.peer=peer;
+    const to=setTimeout(()=>fail({type:'timeout'}),25000);
+    peer.on('error',e=>{if(!settled)fail(e)});
+    peer.on('open',()=>{
+      const conn=peer.connect(PREFIX+code,{reliable:true,serialization:'json'});A.conn=conn;
+      conn.on('open',()=>{conn.send({t:'hello',v:VER,pid,tok,name})});
+      conn.on('data',d=>{
+        if(!settled){
+          if(d&&d.t==='welcome'){settled=true;clearTimeout(to);A.seq=0;A.offset=-Infinity;A.lastRx=Date.now();resolve()}
+          else if(d&&d.t==='reject')fail({type:'reject',why:String(d.why||'')});
+          return;
+        }
+        onClientData(d);
+      });
+      conn.on('close',()=>{if(!settled)fail({type:'closed'});else if(A.conn===conn)onLost()});
+      conn.on('error',e=>{if(!settled)fail(e)});
+    });
+  });
+}
+async function joinRoom(code,name){
+  const btn=$('#joinGo');btn.disabled=true;
+  const sess=(()=>{try{return JSON.parse(store('esmf-sess')||'null')}catch{return null}})();
+  const pid=sess&&sess.code===code?sess.pid:uid(10),tok=sess&&sess.code===code?sess.tok:uid(24);
+  $('#joinErr').textContent='';toast('در حال اتصال به اتاق…');
+  try{
+    await connectClient(code,name,pid,tok);
+    A.role='client';A.left=false;A.code=code;A.me={id:pid,name,tok};A.S=null;A.key=null;
+    store('esmf-sess',JSON.stringify({code,pid,tok,name}));
+    startHeartbeat();
+  }catch(e){const m=peerErr(e);$('#joinErr').textContent=m;toast(m,'bad');teardownPeer()}
+  finally{btn.disabled=false}
+}
+let hbT=0;
+function startHeartbeat(){
+  clearInterval(hbT);
+  hbT=setInterval(()=>{
+    if(A.role!=='client'||A.reconnecting)return;
+    if(A.conn&&A.conn.open){try{A.conn.send({t:'ping'})}catch{}}
+    if(Date.now()-A.lastRx>14000)onLost();
+  },4000);
+}
+function onClientData(d){
+  if(!d||typeof d!=='object')return;
+  A.lastRx=Date.now();
+  if(d.t==='state'){
+    if(typeof d.phase!=='string'||!Array.isArray(d.players)||typeof d.seq!=='number'||typeof d.hostNow!=='number')return;
+    A.offset=Math.max(A.offset,d.hostNow-Date.now());
+    if(d.seq>A.seq){A.seq=d.seq;applyState(d)}
+  }else if(d.t==='pong'&&typeof d.now==='number')A.offset=Math.max(A.offset,d.now-Date.now());
+  else if(d.t==='kicked'){toast('میزبان شما را از اتاق حذف کرد.','bad');resetToHome()}
+  else if(d.t==='closed'){toast('میزبان بازی را بسته است.','bad');resetToHome()}
+}
+function onLost(){if(A.role!=='client'||A.left||A.reconnecting)return;reconnect()}
+async function reconnect(){
+  A.reconnecting=true;pillUpdate();
+  for(let i=1;i<=6&&!A.left;i++){
+    await sleep(1200*i);if(A.left)break;
+    try{await connectClient(A.code,A.me.name,A.me.id,A.me.tok);A.reconnecting=false;pillUpdate();toast('دوباره متصل شدید.','ok');return}
+    catch(e){if(e&&e.type==='reject')break}
+  }
+  A.reconnecting=false;
+  if(!A.left){toast('اتصال به اتاق برقرار نشد. میزبان در دسترس نیست.','bad');resetToHome()}
+}
+function now(){return Date.now()+(A.role==='host'||A.offset===-Infinity?0:A.offset)}
+function act(m){
+  if(A.role==='host'){if(G)handle(A.me.id,m)}
+  else if(A.conn&&A.conn.open){try{A.conn.send(m)}catch{}}
+}
+function resetToHome(){
+  A.left=true;clearInterval(hbT);clearInterval(sweepT);clearTimers();closeScanner();cancelAnimationFrame(cfRaf);$('#confetti').getContext('2d').clearRect(0,0,9999,9999);
+  try{if(wl)wl.release()}catch{}wl=null;
+  teardownPeer();G=null;A.role=null;A.S=null;A.key=null;A.vp=null;A.reconnecting=false;A.code=null;store('esmf-sess',null);
+  $('#lock').hidden=true;$('#pill').hidden=true;refreshResume();show('s-home');
+}
+async function leaveGame(){
+  if(!await confirmBox('از بازی خارج می‌شوید؟'+(A.role==='host'?' با خروج میزبان، بازی برای همه بسته می‌شود.':''),'خروج'))return;
+  if(A.role==='host'&&G){for(const id of G.order){const p=G.players[id];if(p&&p.conn&&p.conn.open)try{p.conn.send({t:'closed'})}catch{}}}
+  else if(A.conn&&A.conn.open){try{A.conn.send({t:'leave'})}catch{}}
+  setTimeout(resetToHome,120);
+}
+window.addEventListener('pagehide',()=>{if(A.role==='host'&&G){for(const id of G.order){const p=G.players[id];if(p&&p.conn&&p.conn.open)try{p.conn.send({t:'closed'})}catch{}}}else if(A.role==='client'&&A.conn&&A.conn.open){try{A.conn.send({t:'leave'})}catch{}store('esmf-sess',store('esmf-sess'))}});
+
+/* ---------- Self-contained QR scanner (native browser API; no library downloads) ---------- */
+const SC={stream:null,on:false,t:0,lastBad:0,detector:null,busy:false};
+async function openScanner(){
+  const name=cleanName($('#joinName').value);
+  if(!nameOk(name)){$('#joinErr').textContent=ERR.name;$('#joinName').focus();return}
+  $('#joinErr').textContent='';
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.isSecureContext){$('#joinErr').textContent=ERR.insecure;$('#codeIn').focus();return}
+  if(!('BarcodeDetector' in window)){$('#joinErr').textContent='این مرورگر اسکن خودکار QR را پشتیبانی نمی‌کند. Chrome یا Edge به‌روز را امتحان کنید یا کد اتاق را دستی وارد کنید.';$('#codeIn').focus();return}
+  try{SC.detector=new BarcodeDetector({formats:['qr_code']})}catch{$('#joinErr').textContent='اسکنر QR در این مرورگر در دسترس نیست؛ کد اتاق را دستی وارد کنید.';return}
+  const ov=$('#scanner');ov.hidden=false;$('#scMsg').textContent='در حال باز کردن دوربین…';$('#scClose').focus();
+  try{
+    SC.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
+    if(ov.hidden){stopStream();return}
+    const v=$('#scVideo');v.srcObject=SC.stream;await v.play();SC.on=true;$('#scMsg').textContent='QR میزبان را داخل کادر بگیرید';scanLoop();
+  }catch(e){
+    closeScanner();
+    $('#joinErr').textContent=e&&(e.name==='NotAllowedError'||e.name==='SecurityError')?ERR.denied:e&&(e.name==='NotFoundError'||e.name==='OverconstrainedError')?ERR.nocam:'باز کردن دوربین ممکن نشد. کد اتاق را دستی وارد کنید.';
+    $('#codeIn').focus();
+  }
+}
+function stopStream(){if(SC.stream){SC.stream.getTracks().forEach(t=>t.stop());SC.stream=null}const v=$('#scVideo');v.pause();v.srcObject=null}
+function closeScanner(){SC.on=false;SC.busy=false;clearTimeout(SC.t);stopStream();const o=$('#scanner');if(o)o.hidden=true}
+async function scanLoop(){
+  if(!SC.on||SC.busy)return;
+  const v=$('#scVideo');
+  if(v.readyState>=2&&v.videoWidth){
+    SC.busy=true;
+    try{
+      const found=await SC.detector.detect(v);
+      for(const item of found){
+        const code=parseQR(item.rawValue);
+        if(code){const name=cleanName($('#joinName').value);closeScanner();$('#codeIn').value=code;joinRoom(code,name);return}
+        if(Date.now()-SC.lastBad>1800){SC.lastBad=Date.now();$('#scMsg').textContent='QR شناسایی شد اما کد آن معتبر نیست؛ کد QR میزبان را اسکن کنید.'}
+      }
+    }catch(e){/* Some camera frames may not decode; keep scanning. */}
+    finally{SC.busy=false}
+  }
+  if(SC.on)SC.t=setTimeout(scanLoop,180);
+}
+
+/* ---------- views ---------- */
+const nameOf=id=>{const p=A.S&&A.S.players.find(p=>p.id===id);return p?p.name:'یک بازیکن'};
+const fmt=ms=>{const s=Math.max(0,Math.ceil(ms/1000));return fa(Math.floor(s/60))+':'+fa(String(s%60).padStart(2,'0'))};
+const hue=id=>{let x=0;for(const c of id)x=(x*31+c.charCodeAt(0))%360;return x};
+function pillUpdate(){
+  const p=$('#pill');if(!A.role){p.hidden=true;return}
+  p.hidden=false;let k='ok',t='';
+  if(A.role==='host'){k=A.sig==='ok'?'ok':'warn';t='میزبان · اتاق '+A.code+(k==='warn'?' · ارتباط با سرور ناپایدار':'')}
+  else if(A.reconnecting){k='warn';t='در حال اتصال مجدد…'}
+  else{k='ok';t='متصل · اتاق '+A.code}
+  $('#pdot').className='dot '+k;$('#ptxt').textContent=t;
+}
+function viewPhase(s){return s.phase==='countdown'&&now()>=s.startAt?'round':s.phase}
+function applyState(s){A.S=s;renderState()}
+const B={},U={};
+function renderState(){
+  const s=A.S;if(!s)return;
+  const vp=viewPhase(s);A.vp=vp;const k=vp+':'+s.round;
+  if(k!==A.key){A.key=k;if(B[vp])B[vp](s)}
+  if(U[vp])U[vp](s);pillUpdate();
+}
+/* lobby */
+// Compact QR encoder for the short ESMF:ABCDE room payload (QR version 1-L).
+// All code is embedded here; generating a room QR never downloads a library.
+function qrMatrix(text){
+  const bytes=[...new TextEncoder().encode(text)];if(bytes.length>17)throw Error('QR payload too long');
+  const bits=[];const put=(v,n)=>{for(let i=n-1;i>=0;i--)bits.push((v>>>i)&1)};
+  put(4,4);put(bytes.length,8);for(const b of bytes)put(b,8);for(let i=0;i<Math.min(4,152-bits.length);i++)bits.push(0);while(bits.length%8)bits.push(0);
+  const data=[];for(let i=0;i<bits.length;i+=8){let v=0;for(let j=0;j<8;j++)v=(v<<1)|bits[i+j];data.push(v)}
+  for(let pad=0;data.length<19;pad++)data.push(pad%2?0x11:0xEC);
+  const mul=(x,y)=>{let z=0,a=x,b=y;while(b){if(b&1)z^=a;a=(a&0x80)?((a<<1)^0x11D):(a<<1);a&=255;b>>=1}return z&255};
+  const ecc=[127,122,154,164,11,68,117],rem=Array(7).fill(0);
+  for(const b of data){const factor=b^rem[0];rem.shift();rem.push(0);for(let i=0;i<7;i++)rem[i]^=mul(ecc[i],factor)}
+  const all=data.concat(rem),db=[];for(const b of all)for(let i=7;i>=0;i--)db.push((b>>>i)&1);
+  const n=21,m=Array.from({length:n},()=>Array(n).fill(false)),res=Array.from({length:n},()=>Array(n).fill(false));
+  const set=(x,y,v)=>{if(x>=0&&x<n&&y>=0&&y<n){m[y][x]=!!v;res[y][x]=true}};
+  for(const [ox,oy] of [[0,0],[n-7,0],[0,n-7]])for(let dy=-1;dy<=7;dy++)for(let dx=-1;dx<=7;dx++){const x=ox+dx,y=oy+dy;if(x<0||y<0||x>=n||y>=n)continue;const inside=dx>=0&&dx<=6&&dy>=0&&dy<=6;const dark=inside&&(dx===0||dx===6||dy===0||dy===6||(dx>=2&&dx<=4&&dy>=2&&dy<=4));set(x,y,dark)}
+  for(let i=8;i<n-8;i++){set(i,6,i%2===0);set(6,i,i%2===0)}
+  // Reserve both format-information copies and the fixed dark module.
+  for(let i=0;i<=5;i++)set(8,i,false);set(8,7,false);set(8,8,false);set(7,8,false);for(let i=9;i<15;i++)set(14-i,8,false);
+  for(let i=0;i<8;i++)set(n-1-i,8,false);for(let i=8;i<15;i++)set(8,n-15+i,false);set(8,n-8,true);
+  let k=0,up=true;for(let right=n-1;right>=1;right-=2){if(right===6)right=5;for(let vert=0;vert<n;vert++){const y=up?n-1-vert:vert;for(let j=0;j<2;j++){const x=right-j;if(!res[y][x]){let bit=k<db.length?db[k++]:0;if((x+y)%2===0)bit^=1;m[y][x]=!!bit}}}up=!up}
+  let fmtRem=(8<<10);for(let i=14;i>=10;i--)if((fmtRem>>>i)&1)fmtRem^=(0x537<<(i-10));const fmt=((8<<10)|(fmtRem&0x3FF))^0x5412;
+  const fbit=i=>(fmt>>>i)&1;
+  for(let i=0;i<=5;i++)m[i][8]=!!fbit(i);m[7][8]=!!fbit(6);m[8][8]=!!fbit(7);m[8][7]=!!fbit(8);for(let i=9;i<15;i++)m[8][14-i]=!!fbit(i);
+  for(let i=0;i<8;i++)m[8][n-1-i]=!!fbit(i);for(let i=8;i<15;i++)m[n-15+i][8]=!!fbit(i);m[n-8][8]=true;
+  return m;
+}
+function qrSvg(text){
+  const matrix=qrMatrix(text),n=matrix.length,quiet=4;let d='';
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++)if(matrix[y][x])d+='M'+(x+quiet)+','+(y+quiet)+'h1v1h-1z';
+  const size=n+quiet*2;return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+size+' '+size+'" shape-rendering="crispEdges" role="img" aria-label="QR اتاق"><rect width="'+size+'" height="'+size+'" fill="#fff"/><path d="'+d+'" fill="#000"/></svg>';
+}
+const joinLink=code=>/^https?:$/.test(location.protocol)?location.href.split('#')[0]+'#room='+code:null;
+// Keep the QR payload short and independent of the hosting URL; the scanner extracts the room code.
+const qrText=code=>'ESMF:'+code;
+B.lobby=s=>{show('s-lobby');A.ans=[];A.ansR=-1;$('#lock').hidden=true;$('#roomCode').textContent=s.room;
+  const box=$('#qrBox');try{box.innerHTML=window.qrcode?qrSvg(qrText(s.room)):''}catch{box.textContent=''}
+  $('#shareBtn').hidden=!joinLink(s.room)};
+U.lobby=s=>{
+  const host=A.role==='host',list=$('#plist');list.replaceChildren();
+  const on=s.players.filter(p=>p.online).length;$('#pcount').textContent='('+fa(s.players.length)+' از '+fa(MAX)+')';
+  for(const p of s.players){
+    const isH=p.id===s.hostId,me=p.id===A.me.id;
+    list.append(h('li',{},
+      h('span',{class:'av',style:'--h:'+hue(p.id),'aria-hidden':'true',text:Array.from(p.name)[0]||'؟'}),
+      h('span',{class:'pn',text:p.name}),
+      isH?h('span',{class:'tag',text:'میزبان'}):null,me?h('span',{class:'tag me',text:'شما'}):null,
+      h('span',{class:'st'},h('i',{class:'dot '+(p.online?'ok':'bad')}),p.online?'متصل':'قطع‌شده'),
+      p.score?h('span',{class:'chip',text:fa(p.score)+' امتیاز'}):null,
+      host&&!isH?h('button',{class:'btn sm danger',text:'حذف','aria-label':'حذف '+p.name,onclick:async()=>{if(await confirmBox('«'+p.name+'» از اتاق حذف شود؟','حذف'))act({t:'kick',id:p.id})}}):null));
+  }
+  $('#hostCtl').hidden=!host;$('#waitHost').hidden=host;
+  if(host){$('#startBtn').disabled=on<2;$('#startHint').textContent=on<2?'برای شروع حداقل ۲ بازیکن متصل لازم است.':'صفحه را در طول بازی باز نگه دارید؛ اگر میزبان خارج شود بازی تمام می‌شود.';
+    $('#durSel').value=String(s.dur);$('#resetScores').hidden=!s.players.some(p=>p.score)}
+};
+/* choose */
+B.choose=s=>{
+  show('s-choose');const mine=s.chooser===A.me.id;
+  $('#chTitle').textContent=mine?'حرف این دور را انتخاب کن':nameOf(s.chooser)+' در حال انتخاب حرف است';
+  $('#chSub').textContent=mine?'یکی از حروف را بزن؛ حروفِ پرتکرار قبلی غیرفعال‌اند.':'لطفاً چند ثانیه صبر کنید…';
+  const g=$('#letterGrid');g.replaceChildren();g.hidden=!mine;
+  if(mine)for(const l of LETTERS)g.append(h('button',{class:'lt',text:l,disabled:s.usedLetters.includes(l)&&LETTERS.some(x=>!s.usedLetters.includes(x)),'aria-label':'حرف '+l,onclick:()=>{$$('.lt',g).forEach(b=>b.disabled=true);act({t:'letter',r:s.round,l})}}));
+};
+/* countdown */
+B.countdown=s=>{show('s-count');$('#cdLetter').textContent=s.letter;A.lastCd=null;$('#cdNum').textContent='۳'};
+/* round */
+const fstate=(v,L)=>{const t=norm(v).trim();return !t?'':lead(t)===L?'ok':'bad'};
+function complete(){const s=A.S;return A.ans.length===10&&A.ans.every(v=>fstate(v,s.letter)==='ok')}
+let sendT=0;
+function sendAns(now_=false){
+  clearTimeout(sendT);const go=()=>{if(A.S&&A.vp==='round')act({t:'ans',r:A.S.round,a:A.ans.slice()})};
+  if(now_)go();else sendT=setTimeout(go,220);
+}
+function updProg(){
+  const s=A.S,ok=A.ans.filter(v=>fstate(v,s.letter)==='ok').length,all=complete();
+  $('#rdProg').textContent=fa(ok)+' از '+fa(CATS.length)+' پاسخ کامل';$('#stopBtn').disabled=!all||!!A.stopSent;
+}
+B.round=s=>{
+  show('s-round');$('#lock').hidden=true;A.stopSent=false;
+  if(A.ansR!==s.round){A.ans=blank();A.ansR=s.round}
+  $('#rdLetter').textContent=s.letter;$('#rdNo').textContent='دور '+fa(s.round);
+  const f=$('#fields');f.replaceChildren();
+  CATS.forEach((cat,i)=>{
+    const id='f'+i;
+    const inp=h('input',{id,dir:'rtl',lang:'fa',type:'text',inputmode:'text',autocomplete:'off',autocapitalize:'off',autocorrect:'off',spellcheck:'false',enterkeyhint:i<9?'next':'done',maxlength:MAXLEN,placeholder:'با «'+s.letter+'» شروع شود','aria-describedby':'h'+i});
+    inp.value=A.ans[i]||'';
+    const mk=h('span',{class:'mk','aria-hidden':'true'}),hn=h('div',{class:'hn',id:'h'+i});
+    const upd=()=>{const st=fstate(inp.value,s.letter);inp.className=st==='ok'?'ok':'';inp.setAttribute('aria-invalid',st==='bad');mk.className='mk '+st;mk.textContent=st==='ok'?'✓':st==='bad'?'✕':'';hn.textContent=st==='bad'?'باید با «'+s.letter+'» شروع شود':''};
+    inp.addEventListener('input',()=>{A.ans[i]=inp.value;upd();updProg();sendAns()});
+    inp.addEventListener('blur',()=>sendAns(true));
+    inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const nx=$('#f'+(i+1));if(nx)nx.focus();else if(!$('#stopBtn').disabled)$('#stopBtn').focus()}});
+    upd();f.append(h('div',{class:'fd'},h('label',{for:id,text:cat}),inp,mk,hn));
+  });
+  updProg();
+};
+U.round=()=>{};
+B.collect=s=>{
+  if(A.screen!=='s-round')B.round(s);
+  $$('#fields input').forEach(i=>i.readOnly=true);document.activeElement&&document.activeElement.blur&&document.activeElement.blur();
+  const st=s.stopper;$('#lockTxt').textContent=st?(st===A.me.id?'استپ کردی!':nameOf(st)+' استپ کرد!'):'زمان تمام شد!';
+  $('#lock').hidden=false;sfx.stop();
+  setTimeout(()=>act({t:'final',r:s.round,a:A.ans.slice()}),A.role==='host'?30:0);
+};
+$('#stopBtn').addEventListener('click',()=>{if(A.vp!=='round'||A.stopSent)return;A.stopSent=true;$('#stopBtn').disabled=true;act({t:'stop',r:A.S.round,a:A.ans.slice()})});
+$('#forceStop').addEventListener('click',async()=>{
+  if(A.vp!=='round')return;
+  if(await confirmBox('بازی برای همه تمام می‌شود و پاسخ‌های خالی امتیازی نمی‌گیرند. ادامه می‌دهید؟','استپ کن')&&A.vp==='round'&&!A.stopSent){A.stopSent=true;act({t:'stop',r:A.S.round,a:A.ans.slice(),force:true})}
+});
+/* voting */
+B.voting=s=>{show('s-vote');$('#lock').hidden=true};
+U.voting=s=>{
+  const box=$('#vcards');box.replaceChildren();
+  $('#vtProg').textContent=s.prog?'رأی‌های ثبت‌شده: '+fa(s.prog.done)+' از '+fa(s.prog.total):'';
+  let mine=0;
+  for(const c of s.cards||[]){
+    let body;
+    if(c.own)body=h('p',{class:'muted',text:'این پاسخ مربوط به شماست؛ دیگران درباره‌ی آن رأی می‌دهند.'});
+    else if(!c.can)body=h('p',{class:'muted',text:'شما در این رأی‌گیری شرکت ندارید.'});
+    else{mine++;const done=c.vote!==null;
+      body=h('div',{},h('div',{class:'q',text:'این پاسخ درسته؟'}),h('div',{class:'vb'},
+        h('button',{class:'btn yes',text:'درسته','aria-pressed':c.vote===true,disabled:done,onclick:()=>{sfx.vote();act({t:'vote',r:s.round,c:c.id,v:true})}}),
+        h('button',{class:'btn no',text:'نادرسته','aria-pressed':c.vote===false,disabled:done,onclick:()=>{sfx.vote();act({t:'vote',r:s.round,c:c.id,v:false})}})),
+        done?h('p',{class:'muted small',text:'رأی شما ثبت شد.'}):null)}
+    box.append(h('div',{class:'vc'},h('div',{class:'chips'},h('span',{class:'chip',text:c.cat}),h('span',{class:'chip l',text:'حرف «'+s.letter+'»'})),h('div',{class:'word',dir:'rtl',text:c.word}),body));
+  }
+  if(!mine)box.prepend(h('p',{class:'center muted',style:'margin-top:14px',text:'در این مرحله رأیی از شما لازم نیست؛ منتظر رأی بقیه باشید.'}));
+};
+/* results */
+B.results=s=>{
+  show('s-results');$('#lock').hidden=true;const R=s.results;if(!R)return;
+  const names=R.winners.map(id=>(R.players.find(p=>p.id===id)||{}).name).filter(Boolean);
+  $('#rsT').textContent=names.length?(names.length>1?'برندگان این دور: ':'برنده‌ی این دور: ')+names.join(' و '):'این دور برنده‌ای نداشت';
+  $('#rsS').textContent='حرف «'+R.letter+'» · دور '+fa(R.round)+' · '+(R.timeUp?'زمان تمام شد':R.stopper+' استپ کرد');
+  const sorted=R.players.slice().sort((a,b)=>b.total-a.total);
+  const bd=$('#rsBoard');bd.replaceChildren();
+  sorted.forEach((p,i)=>bd.append(h('li',{class:i===0&&p.total>0?'top1':''},h('span',{class:'av',style:'--h:'+hue(p.id),'aria-hidden':'true',text:Array.from(p.name)[0]||'؟'}),h('span',{class:'pn',text:p.name+(p.id===A.me.id?' (شما)':'')}),h('span',{class:'sc'},fa(p.total)+' امتیاز',h('small',{text:'این دور: '+fa(p.round)})))));
+  const th=h('tr',{},h('th',{scope:'col',text:'دسته'}),R.players.map(p=>h('th',{scope:'col',text:p.name})));
+  const cell=(c,p)=>h('td',{'data-label':p.name},h('div',{},h('div',{class:'w',dir:'rtl',text:c.text||'—'}),h('div',{class:'n',text:c.note})),h('span',{class:'pts '+(c.pts===10?'p10':c.pts===5?'p5':''),text:fa(c.pts)}));
+  const body=R.rows.map(r=>h('tr',{},h('td',{class:'cat',text:r.cat}),R.players.map(p=>cell(r.cells[p.id],p))));
+  const f1=h('tr',{},h('td',{class:'cat',text:'جمع این دور'}),R.players.map(p=>h('td',{'data-label':p.name,text:fa(p.round)})));
+  const f2=h('tr',{},h('td',{class:'cat',text:'جمع کل'}),R.players.map(p=>h('td',{'data-label':p.name,text:fa(p.total)})));
+  const t=h('table',{class:'rt'},h('caption',{class:'sr',text:'نتایج دور'}),h('thead',{},th),h('tbody',{},body),h('tfoot',{},f1,f2));
+  $('#rsTable').replaceChildren(t);
+  if(names.length){sfx.win();confetti()}
+};
+U.results=s=>{
+  const host=A.role==='host',on=s.players.filter(p=>p.online).length;
+  $('#nextBtn').hidden=!host;$('#toLobbyBtn').hidden=!host;$('#rsWait').hidden=host;$('#nextBtn').disabled=on<2;
+};
+/* tick */
+let lastTick=null;
+setInterval(()=>{
+  const s=A.S;if(!s)return;
+  const vp=viewPhase(s);if(vp!==A.vp)renderState();
+  const n=now();
+  if(vp==='choose')$('#chTimer').textContent=fmt(s.chooseEnd-n);
+  else if(vp==='countdown'){
+    const c=Math.ceil((s.startAt-n)/1000);
+    if(c!==A.lastCd&&c>=1&&c<=3){A.lastCd=c;const el=$('#cdNum');el.textContent=fa(c);el.classList.remove('pop');void el.offsetWidth;el.classList.add('pop');sfx.tick()}
+  }else if(vp==='round'){
+    const rem=s.endAt-n;$('#rdTimer').textContent=fmt(rem);const b=$('#rdBar');b.style.transform='scaleX('+Math.max(0,Math.min(1,rem/(s.dur*1000)))+')';b.classList.toggle('low',rem<10000);
+    if(lastTick!==s.round){lastTick=s.round;sfx.go()}
+  }else if(vp==='voting')$('#vtTimer').textContent=fmt(s.voteEnd-n);
+},100);
+
+/* ---------- events ---------- */
+function refreshResume(){
+  let sess=null;try{sess=JSON.parse(store('esmf-sess')||'null')}catch{}
+  const b=$('#resumeBtn');b.hidden=!sess;if(sess)b.textContent='بازگشت به اتاق '+sess.code;
+}
+$('#btnSound').onclick=()=>setSound(!soundOn);
+$('#btnTheme').onclick=()=>setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
+$('#goHost').onclick=()=>{show('s-host');$('#hostName').value=lstore('esmf-name')||'';$('#hostErr').textContent=''};
+$('#goJoin').onclick=()=>{show('s-join');$('#joinName').value=lstore('esmf-name')||'';$('#joinErr').textContent=''};
+$$('[data-back]').forEach(b=>b.onclick=()=>show('s-home'));
+$('#hostForm').addEventListener('submit',e=>{
+  e.preventDefault();const n=cleanName($('#hostName').value);
+  if(!nameOk(n)){$('#hostErr').textContent=ERR.name;$('#hostName').focus();return}
+  $('#hostErr').textContent='';lstore('esmf-name',n);createRoom(n);
+});
+$('#joinForm').addEventListener('submit',e=>{
+  e.preventDefault();const n=cleanName($('#joinName').value);
+  if(!nameOk(n)){$('#joinErr').textContent=ERR.name;$('#joinName').focus();return}
+  const c=normCode($('#codeIn').value);
+  if(!codeOk(c)){$('#joinErr').textContent=ERR.code;$('#codeIn').focus();return}
+  lstore('esmf-name',n);joinRoom(c,n);
+});
+$('#scanBtn').onclick=()=>{lstore('esmf-name',cleanName($('#joinName').value));openScanner()};
+$('#scClose').onclick=closeScanner;
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#scanner').hidden)closeScanner()});
+$('#resumeBtn').onclick=async()=>{
+  let sess=null;try{sess=JSON.parse(store('esmf-sess')||'null')}catch{}if(!sess)return;
+  $('#resumeBtn').disabled=true;
+  try{await connectClient(sess.code,sess.name,sess.pid,sess.tok);A.role='client';A.left=false;A.code=sess.code;A.me={id:sess.pid,name:sess.name,tok:sess.tok};A.S=null;A.key=null;startHeartbeat()}
+  catch(e){toast(peerErr(e),'bad');store('esmf-sess',null);refreshResume();teardownPeer()}
+  finally{$('#resumeBtn').disabled=false}
+};
+async function copyText(t){try{await navigator.clipboard.writeText(t);return true}catch{const i=h('textarea',{style:'position:fixed;opacity:0'});i.value=t;document.body.append(i);i.select();let ok=false;try{ok=document.execCommand('copy')}catch{}i.remove();return ok}}
+$('#copyCode').onclick=async()=>{const ok=await copyText(A.S.room);toast(ok?'کد اتاق کپی شد.':'کپی نشد؛ کد را دستی بنویسید.',ok?'ok':'bad')};
+$('#shareBtn').onclick=async()=>{const l=joinLink(A.S.room);if(!l)return;
+  if(navigator.share){try{await navigator.share({title:'اسم و فامیل',text:'به بازی اسم و فامیل بپیوند! کد اتاق: '+A.S.room,url:l});return}catch(e){if(e&&e.name==='AbortError')return}}
+  toast(await copyText(l)?'لینک ورود کپی شد.':'کپی نشد.')};
+$('#startBtn').onclick=()=>act({t:'start'});
+$('#durSel').onchange=e=>act({t:'dur',v:Number(e.target.value)});
+$('#resetScores').onclick=async()=>{if(await confirmBox('امتیاز همه‌ی بازیکنان صفر شود؟','صفر کن'))act({t:'reset'})};
+$('#leaveLobby').onclick=leaveGame;$('#leaveRes').onclick=leaveGame;
+$('#nextBtn').onclick=()=>act({t:'next'});$('#toLobbyBtn').onclick=()=>act({t:'lobby'});
+
+/* ورود از لینک QR */
+(()=>{
+  const m=(location.hash||'').match(/room=([A-Za-z0-9]{5})/);refreshResume();
+  if(m&&codeOk(m[1].toUpperCase())&&A.role===null){show('s-join');$('#joinName').value=lstore('esmf-name')||'';$('#codeIn').value=m[1].toUpperCase();toast('کد اتاق شناسایی شد. نام خود را بنویسید و وارد شوید.','ok')}
+  else show('s-home');
+  if(!window.Peer)toast('کتابخانه‌ی اتصال بازی بارگیری نشده است؛ QR مستقل است اما اتصال چندنفره به کتابخانه‌ی PeerJS نیاز دارد. صفحه را با اینترنت بازخوانی کنید.','bad');
 })();
 })();
 </script>
